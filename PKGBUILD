@@ -13,21 +13,21 @@ optdepends=(
     'jq: JSON parsing for status bar scripts'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('5707e59a00f4bfafb8a70a8a47fa22a221d01d9b0125d81cb51752cd724b516a')
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "DevChron-$pkgver"
     export CARGO_TARGET_DIR=target
     cargo build --release --locked
 }
 
 check() {
-    cd "$pkgname-$pkgver"
+    cd "DevChron-$pkgver"
     cargo test --release --locked
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "DevChron-$pkgver"
     
     # Install binary
     install -Dm755 "target/release/$pkgname" \
