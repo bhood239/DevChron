@@ -2,7 +2,9 @@
 
 A stunning, lightweight TUI Pomodoro timer for Hyprland/Wayland, built with Rust and ratatui.
 
-![DevChron Demo](assets/demo.png)
+![DevChron Focus Phase Demo](assets/focus_demo.png)
+![DevChron Break Phase Demo](assets/short_break_demo.png)
+![DevChron Long Break Phase Demo](assets/long_break_demo.png)
 
 ## Features
 
@@ -163,4 +165,4 @@ Contributions welcome! Please open an issue or PR.
 
 ---
 
-Made with ❤️ for focused developers
+Made with ❤️ for developers that like their focus time
