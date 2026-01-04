@@ -50,15 +50,4 @@ impl SessionStats {
             format!("{}m", mins)
         }
     }
-
-    pub fn format_total_time(&self) -> String {
-        let hours = self.total_focus_time.as_secs() / 3600;
-        let mins = (self.total_focus_time.as_secs() % 3600) / 60;
-        
-        if hours > 0 {
-            format!("{}h {:02}m", hours, mins)
-        } else {
-            format!("{}m", mins)
-        }
-    }
 }

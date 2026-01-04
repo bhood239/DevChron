@@ -8,7 +8,6 @@ use settings::Settings;
 
 pub struct Config {
     pub settings: Settings,
-    config_path: PathBuf,
 }
 
 impl Config {
@@ -27,7 +26,6 @@ impl Config {
         
         Ok(Self {
             settings,
-            config_path,
         })
     }
     
@@ -45,14 +43,6 @@ impl Config {
         let toml_string = toml::to_string_pretty(settings)
             .map_err(|e| Error::Config(e.to_string()))?;
         fs::write(path, toml_string)?;
-        Ok(())
-    }
-    
-    pub fn reload(&mut self) -> Result<()> {
-        if self.config_path.exists() {
-            let content = fs::read_to_string(&self.config_path)?;
-            self.settings = toml::from_str(&content)?;
-        }
         Ok(())
     }
 }

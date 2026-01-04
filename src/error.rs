@@ -6,8 +6,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Io(std::io::Error),
     Config(String),
-    Terminal(String),
-    Notification(String),
 }
 
 impl fmt::Display for Error {
@@ -15,8 +13,6 @@ impl fmt::Display for Error {
         match self {
             Error::Io(err) => write!(f, "IO error: {}", err),
             Error::Config(msg) => write!(f, "Config error: {}", msg),
-            Error::Terminal(msg) => write!(f, "Terminal error: {}", msg),
-            Error::Notification(msg) => write!(f, "Notification error: {}", msg),
         }
     }
 }

@@ -14,23 +14,7 @@ pub enum TimerPhase {
     LongBreak,
 }
 
-impl TimerPhase {
-    pub fn display_name(&self) -> &str {
-        match self {
-            TimerPhase::Focus => "Focus Time",
-            TimerPhase::ShortBreak => "Short Break",
-            TimerPhase::LongBreak => "Long Break",
-        }
-    }
-
-    pub fn emoji(&self) -> &str {
-        match self {
-            TimerPhase::Focus => "🍅",
-            TimerPhase::ShortBreak => "☕",
-            TimerPhase::LongBreak => "🌴",
-        }
-    }
-}
+impl TimerPhase {}
 
 #[derive(Debug, Clone)]
 pub struct Timer {
@@ -80,10 +64,6 @@ impl Timer {
 
     pub fn is_running(&self) -> bool {
         self.state == TimerState::Running
-    }
-
-    pub fn is_completed(&self) -> bool {
-        self.state == TimerState::Completed
     }
 
     pub fn percentage_complete(&self) -> u16 {
