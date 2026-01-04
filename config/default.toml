@@ -1,0 +1,17 @@
+# DevChron Configuration
+
+[timer]
+focus_duration = 25        # minutes
+short_break_duration = 5   # minutes
+long_break_duration = 15   # minutes
+cycles_before_long_break = 4
+
+[notifications]
+enabled = true
+sound_enabled = false
+
+[ui]
+theme = "nord"  # nord, catppuccin, classic
+
+[integrations]
+hyprland_status_bar = true
