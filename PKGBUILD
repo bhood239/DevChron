@@ -1,4 +1,4 @@
-Maintainer: Ben Hood <benhood97@btinternet.com>
+# Maintainer: Ben Hood <benhood97@btinternet.com>
 pkgname=devchron
 pkgver=0.1.0
 pkgrel=1
