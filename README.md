@@ -8,15 +8,15 @@ A stunning, lightweight TUI Pomodoro timer for Hyprland/Wayland, built with Rust
 
 ## Features
 
-- 🍅 **Pomodoro Timer**: Classic 25-minute focus sessions
-- ☕ **Smart Breaks**: Automatic short (5min) and long (15min) breaks
-- ⚙️ **Configurable**: Customize all timer durations via TOML config
-- 🎨 **Beautiful Themes**: Nord, Catppuccin, and Classic color schemes
-- 🔔 **Desktop Notifications**: Get notified when each phase completes
-- 📊 **Session Tracking**: Track your daily and total focus time
-- ⌨️ **Keyboard Driven**: Full keyboard control with intuitive shortcuts
-- 🪟 **Status Bar Integration**: JSON output for Waybar/Polybar integration
-- 🌊 **Wayland Native**: Built for modern Linux compositors
+- **Pomodoro Timer**: Classic 25-minute focus sessions
+- **Smart Breaks**: Automatic short (5min) and long (15min) breaks
+- **Configurable**: Customize all timer durations via TOML config
+- **Beautiful Themes**: Nord, Catppuccin, and Classic color schemes
+- **Desktop Notifications**: Get notified when each phase completes
+- **Session Tracking**: Track your daily and total focus time
+- **Keyboard Driven**: Full keyboard control with intuitive shortcuts
+- **Status Bar Integration**: JSON output for Waybar/Polybar integration
+- **Wayland Native**: Built for modern Linux compositors
 
 ## Installation
 
