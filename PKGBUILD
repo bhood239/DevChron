@@ -1,6 +1,6 @@
 # Maintainer: Ben Hood <benhood97@btinternet.com>
 pkgname=devchron
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="A stunning TUI Pomodoro timer for Hyprland/Wayland"
 arch=('x86_64')
