@@ -1,3 +1,4 @@
+mod cli;
 mod error;
 mod config;
 mod timer;
@@ -9,6 +10,7 @@ mod app;
 
 use std::io;
 use std::time::Duration;
+use clap::Parser;
 use crossterm::{
     event::{self, Event},
     execute,
@@ -21,13 +23,30 @@ use ratatui::{
 use tokio::time::interval;
 
 use app::App;
+use cli::{Cli, Commands};
 use config::Config;
 use events::{handle_key, Action};
 use error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::load()?;
+    let cli = Cli::parse();
+
+    // ── `devchron status` subcommand ─────────────────────────────────────────
+    if let Some(Commands::Status { json }) = cli.command {
+        return run_status(json);
+    }
+
+    // ── Normal TUI mode ──────────────────────────────────────────────────────
+    let mut config = Config::load()?;
+
+    // Apply CLI overrides on top of config file values.
+    if let Some(theme) = &cli.theme {
+        config.settings.ui.theme = theme.clone();
+    }
+    if cli.no_notifications {
+        config.settings.notifications.enabled = false;
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,6 +55,15 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config)?;
+
+    // Apply --profile override after App is constructed (profiles are resolved there).
+    if let Some(profile_name) = &cli.profile {
+        let idx = app.profiles.profiles.iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case(profile_name));
+        if let Some(i) = idx {
+            app.switch_profile(i + 1); // switch_profile is 1-based
+        }
+    }
 
     let result = run_app(&mut terminal, &mut app).await;
 
@@ -46,15 +74,50 @@ async fn main() -> Result<()> {
     result
 }
 
+// ── Status subcommand ─────────────────────────────────────────────────────────
+
+fn run_status(json: bool) -> Result<()> {
+    let status_path = dirs::cache_dir()
+        .map(|d| d.join("devchron").join("status.json"));
+
+    let path = match status_path {
+        Some(p) if p.exists() => p,
+        _ => {
+            eprintln!("devchron: not running (no status file found)");
+            std::process::exit(1);
+        }
+    };
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| crate::error::Error::Io(e))?;
+
+    if json {
+        print!("{}", content);
+    } else {
+        // Parse and pretty-print a one-liner.
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            let phase = val["phase"].as_str().unwrap_or("unknown");
+            let time  = val["time_remaining"].as_str().unwrap_or("--:--");
+            let session = val["session"].as_str().unwrap_or("?/?");
+            let running = val["is_running"].as_bool().unwrap_or(false);
+            let state = if running { "▶" } else { "⏸" };
+            println!("{} {} · {} · {}", state, phase, time, session);
+        } else {
+            print!("{}", content);
+        }
+    }
+
+    Ok(())
+}
+
+// ── TUI event loop ────────────────────────────────────────────────────────────
+
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<()> {
     let mut tick_interval = interval(Duration::from_secs(1));
 
-    // SIGUSR1 → toggle pause/resume (Waybar on-click)
-    // SIGUSR2 → skip to next phase
-    // We use channels so the select! branches are always present (just never fire on non-Unix).
     let (sig1_tx, mut sig1_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (sig2_tx, mut sig2_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -84,7 +147,6 @@ async fn run_app<B: ratatui::backend::Backend>(
         });
     }
 
-    // Suppress unused-variable warnings on non-Unix.
     let _ = sig1_tx;
     let _ = sig2_tx;
 
@@ -101,6 +163,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.show_task_input,
                 app.active_profile_name(),
                 app.current_task.as_deref(),
+                app.show_history,
+                app.auto_start_countdown,
+                app.quit_confirm,
+                app.quit_confirm_ticks,
             );
         })?;
 
@@ -108,23 +174,34 @@ async fn run_app<B: ratatui::backend::Backend>(
             _ = tick_interval.tick() => {
                 app.tick();
             }
-
             _ = sig1_rx.recv() => {
-                // SIGUSR1: toggle pause (Waybar on-click)
                 app.toggle_pause();
             }
-
             _ = sig2_rx.recv() => {
-                // SIGUSR2: skip phase
                 app.skip();
             }
-
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if event::poll(Duration::from_millis(0))? {
                     match event::read()? {
                         Event::Key(key) => {
                             if app.show_task_input {
                                 app.handle_task_input_key(key);
+                            } else if app.quit_confirm {
+                                // Quit-confirm popup is showing: Q/Esc confirms quit,
+                                // anything else (including Ctrl+C) dismisses it.
+                                // Ctrl+C always quits immediately regardless.
+                                use crossterm::event::{KeyCode, KeyModifiers};
+                                let is_ctrl_c = key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                                let is_quit = matches!(
+                                    key.code,
+                                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc
+                                );
+                                if is_ctrl_c || is_quit {
+                                    app.quit(); // second press → running = false
+                                } else {
+                                    app.dismiss_quit_confirm();
+                                }
                             } else {
                                 let action = handle_key(key);
                                 match action {
@@ -139,6 +216,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     Action::ToggleMinimal    => app.toggle_minimal(),
                                     Action::OpenTaskInput    => app.open_task_input(),
                                     Action::SwitchProfile(i) => app.switch_profile(i),
+                                    Action::ToggleHistory    => app.toggle_history(),
                                     Action::None             => {}
                                 }
                             }

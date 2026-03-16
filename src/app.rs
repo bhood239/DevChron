@@ -12,8 +12,14 @@ use crate::ui::Theme;
 /// How many render ticks the "CYCLE COMPLETE" celebration banner stays visible.
 const CELEBRATION_TICKS: u8 = 6;
 
+/// How many seconds the quit-confirm popup stays visible before auto-dismissing.
+const QUIT_CONFIRM_TIMEOUT_SECS: u8 = 3;
+
 /// Maximum length of a task tag string.
 const MAX_TASK_LEN: usize = 48;
+
+/// How many seconds to wait before auto-starting the next phase.
+const AUTO_START_DELAY_SECS: u64 = 3;
 
 // ── Profile list ──────────────────────────────────────────────────────────────
 
@@ -67,9 +73,15 @@ pub struct App {
     /// Counts down from CELEBRATION_TICKS to 0 after a full cycle completes.
     pub celebration_ticks: u8,
 
-    // ── Task input ────────────────────────────────────────────────────────────
+    // ── Overlays ──────────────────────────────────────────────────────────────
+    /// Whether the session history overlay is open.
+    pub show_history: bool,
     /// Whether the task-input overlay is currently open.
     pub show_task_input: bool,
+    /// Whether the quit-confirm popup is showing (first Q/Esc press).
+    pub quit_confirm: bool,
+    /// Countdown ticks until the quit-confirm popup auto-dismisses.
+    pub quit_confirm_ticks: u8,
     /// Buffer for the text being typed in the task-input overlay.
     pub task_input: Option<String>,
     /// The confirmed task tag for the current focus session.
@@ -77,6 +89,12 @@ pub struct App {
 
     // ── Profiles ──────────────────────────────────────────────────────────────
     pub profiles: ProfileList,
+
+    // ── Behaviour ─────────────────────────────────────────────────────────────
+    auto_start_breaks: bool,
+    auto_start_focus: bool,
+    /// Countdown (in ticks) before auto-starting the next phase. 0 = not pending.
+    pub auto_start_countdown: u64,
 
     notification_manager: NotificationManager,
     status_writer: StatusWriter,
@@ -96,6 +114,8 @@ impl App {
         let notification_manager = NotificationManager::new(config.settings.notifications.enabled);
         let status_writer = StatusWriter::new(config.settings.integrations.hyprland_status_bar)?;
         let profiles = ProfileList::from_config(&config);
+        let auto_start_breaks = config.settings.behaviour.auto_start_breaks;
+        let auto_start_focus = config.settings.behaviour.auto_start_focus;
 
         Ok(Self {
             timer,
@@ -104,10 +124,16 @@ impl App {
             minimal_mode: false,
             running: true,
             celebration_ticks: 0,
+            show_history: false,
             show_task_input: false,
+            quit_confirm: false,
+            quit_confirm_ticks: 0,
             task_input: None,
             current_task: None,
             profiles,
+            auto_start_breaks,
+            auto_start_focus,
+            auto_start_countdown: 0,
             notification_manager,
             status_writer,
         })
@@ -136,21 +162,29 @@ impl App {
             self.celebration_ticks -= 1;
         }
 
+        // Auto-dismiss the quit-confirm popup after timeout.
+        if self.quit_confirm_ticks > 0 {
+            self.quit_confirm_ticks -= 1;
+            if self.quit_confirm_ticks == 0 {
+                self.quit_confirm = false;
+            }
+        }
+
+        // Auto-start countdown: tick down and fire when it hits zero.
+        if self.auto_start_countdown > 0 {
+            self.auto_start_countdown -= 1;
+            if self.auto_start_countdown == 0 {
+                self.timer.toggle(); // start the new phase
+            }
+        }
+
         // When the timer fires naturally, pass the current task tag.
         if self.timer.current_timer.remaining <= std::time::Duration::from_secs(1)
             && self.timer.is_running()
         {
-            // Peek: will complete this tick — grab the task now before tick() clears it.
             let task = self.current_task.clone();
-            if let Some(event) = {
-                // We need to temporarily override the tick to pass the task.
-                // Simplest: let tick() fire normally (it calls advance_phase_with_task(None)),
-                // then we've already cloned the task above.
-                self.timer.tick()
-            } {
-                // Re-record with the correct task tag if it was a focus session.
-                // The stats entry was already written by tick() with None; we need to
-                // patch the last entry if there was a task.
+            if let Some(event) = self.timer.tick() {
+                // Patch the task tag onto the last completed session entry.
                 if let Some(tag) = task {
                     if let Some(last) = self.timer.stats.completed_sessions.last_mut() {
                         if last.task.is_none() {
@@ -174,6 +208,10 @@ impl App {
         self.show_help = !self.show_help;
     }
 
+    pub fn toggle_history(&mut self) {
+        self.show_history = !self.show_history;
+    }
+
     pub fn toggle_minimal(&mut self) {
         self.minimal_mode = !self.minimal_mode;
     }
@@ -192,8 +230,20 @@ impl App {
         self.update_status();
     }
 
+    /// First press: show confirm popup. Second press within timeout: actually quit.
     pub fn quit(&mut self) {
-        self.running = false;
+        if self.quit_confirm {
+            self.running = false;
+        } else {
+            self.quit_confirm = true;
+            self.quit_confirm_ticks = QUIT_CONFIRM_TIMEOUT_SECS;
+        }
+    }
+
+    /// Dismiss the quit-confirm popup without quitting.
+    pub fn dismiss_quit_confirm(&mut self) {
+        self.quit_confirm = false;
+        self.quit_confirm_ticks = 0;
     }
 
     // ── Task input ────────────────────────────────────────────────────────────
@@ -263,10 +313,25 @@ impl App {
     // ── Private ───────────────────────────────────────────────────────────────
 
     fn handle_phase_event(&mut self, event: PhaseEvent) {
+        use crate::timer::TimerPhase;
+
         self.notification_manager.send_phase_complete(event);
 
         if self.timer.cycle_just_completed {
             self.celebration_ticks = CELEBRATION_TICKS;
+        }
+
+        // Arm auto-start if configured for the phase we just entered.
+        let just_entered_break = matches!(
+            self.timer.current_phase(),
+            TimerPhase::ShortBreak | TimerPhase::LongBreak
+        );
+        let just_entered_focus = self.timer.current_phase() == TimerPhase::Focus;
+
+        if (just_entered_break && self.auto_start_breaks)
+            || (just_entered_focus && self.auto_start_focus)
+        {
+            self.auto_start_countdown = AUTO_START_DELAY_SECS;
         }
     }
 

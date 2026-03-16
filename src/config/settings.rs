@@ -15,6 +15,9 @@ pub struct Settings {
     #[serde(default)]
     pub integrations: IntegrationSettings,
 
+    #[serde(default)]
+    pub behaviour: BehaviourSettings,
+
     /// Named timer profiles. Keys are profile names (e.g. "work", "deep", "quick").
     /// If empty, a set of built-in defaults is used.
     #[serde(default)]
@@ -28,6 +31,7 @@ impl Default for Settings {
             notifications: NotificationSettings::default(),
             ui: UiSettings::default(),
             integrations: IntegrationSettings::default(),
+            behaviour: BehaviourSettings::default(),
             profiles: BTreeMap::new(),
         }
     }
@@ -133,6 +137,28 @@ impl Default for NotificationSettings {
         Self {
             enabled: true,
             sound_enabled: false,
+        }
+    }
+}
+
+// ── Behaviour ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BehaviourSettings {
+    /// Automatically start break timers when a focus session ends (default: false).
+    #[serde(default)]
+    pub auto_start_breaks: bool,
+
+    /// Automatically start the next focus session when a break ends (default: false).
+    #[serde(default)]
+    pub auto_start_focus: bool,
+}
+
+impl Default for BehaviourSettings {
+    fn default() -> Self {
+        Self {
+            auto_start_breaks: false,
+            auto_start_focus: false,
         }
     }
 }

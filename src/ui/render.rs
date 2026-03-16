@@ -1,4 +1,5 @@
 use super::theme::Theme;
+use crate::timer::session::DaySummary;
 use crate::timer::{PomodoroTimer, TimerPhase};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -9,8 +10,6 @@ use ratatui::{
 };
 
 // ─── Big-digit block art ─────────────────────────────────────────────────────
-//
-// Each digit is a 5-row × 5-col pattern; colon is 5-row × 3-col.
 
 const DIGITS: [&[&str]; 10] = [
     &["█████", "█   █", "█   █", "█   █", "█████"], // 0
@@ -29,7 +28,6 @@ const COLON: &[&str] = &["   ", " █ ", "   ", " █ ", "   "];
 
 fn big_digit_lines(time_str: &str, color: ratatui::style::Color) -> Vec<Line<'static>> {
     let mut rows: [String; 5] = Default::default();
-
     for ch in time_str.chars() {
         let pattern: &[&str] = if ch == ':' {
             COLON
@@ -38,13 +36,11 @@ fn big_digit_lines(time_str: &str, color: ratatui::style::Color) -> Vec<Line<'st
         } else {
             continue;
         };
-
         for (i, row) in pattern.iter().enumerate() {
             rows[i].push_str(row);
             rows[i].push(' ');
         }
     }
-
     rows.iter()
         .map(|row| {
             Line::from(Span::styled(
@@ -69,6 +65,10 @@ pub fn render(
     show_task_input: bool,
     profile_name: &str,
     current_task: Option<&str>,
+    show_history: bool,
+    auto_start_countdown: u64,
+    quit_confirm: bool,
+    quit_confirm_ticks: u8,
 ) {
     let size = f.size();
 
@@ -93,12 +93,19 @@ pub fn render(
             celebration_ticks,
             profile_name,
             current_task,
+            auto_start_countdown,
         );
     }
 
-    // Task-input overlay renders on top of everything (including minimal mode).
+    // Overlays render on top of everything (quit confirm is topmost).
+    if show_history {
+        render_history(f, size, timer, theme);
+    }
     if show_task_input {
         render_task_input(f, size, theme, task_input_buf.unwrap_or(""));
+    }
+    if quit_confirm {
+        render_quit_confirm(f, size, theme, quit_confirm_ticks);
     }
 }
 
@@ -112,12 +119,12 @@ fn render_full(
     celebration_ticks: u8,
     profile_name: &str,
     current_task: Option<&str>,
+    auto_start_countdown: u64,
 ) {
     let main_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(theme.border));
-
     let inner = main_block.inner(size);
     f.render_widget(main_block, size);
 
@@ -131,7 +138,14 @@ fn render_full(
         .split(inner);
 
     render_header(f, chunks[0], timer, theme, profile_name, current_task);
-    render_timer(f, chunks[1], timer, theme, celebration_ticks);
+    render_timer(
+        f,
+        chunks[1],
+        timer,
+        theme,
+        celebration_ticks,
+        auto_start_countdown,
+    );
     render_footer(f, chunks[2], timer, theme);
 }
 
@@ -154,7 +168,6 @@ fn render_header(
         TimerPhase::LongBreak => ("長休憩", "LONG BREAK"),
     };
 
-    // Row 1: DevChron │ phase [NAME]  ⏸ PAUSED  ·  task tag
     let mut row1: Vec<Span> = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -189,7 +202,6 @@ fn render_header(
         ));
     }
 
-    // Show active task tag if set (truncated to 28 chars)
     if let Some(task) = current_task {
         let truncated = if task.len() > 28 {
             format!("{}…", &task[..27])
@@ -205,14 +217,13 @@ fn render_header(
         ));
     }
 
-    // Row 3: ─── separator  session  profile
     let session_text = format!(
         "{:02}/{:02}",
         timer.cycle_count + 1,
         timer.cycles_before_long_break
     );
     let profile_label = format!(" [{}] ", profile_name.to_uppercase());
-    let right_section = format!(" {}  {}{}", session_text, "[SESSION]", profile_label);
+    let right_section = format!(" {}  [SESSION]{}", session_text, profile_label);
     let sep_width = (area.width as usize).saturating_sub(right_section.len() + 2);
 
     let header_text = vec![
@@ -240,14 +251,15 @@ fn render_header(
         ]),
     ];
 
-    let header = Paragraph::new(header_text).block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(theme.border)),
+    f.render_widget(
+        Paragraph::new(header_text).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
     );
-
-    f.render_widget(header, area);
 }
 
 // ─── Timer area ──────────────────────────────────────────────────────────────
@@ -258,6 +270,7 @@ fn render_timer(
     timer: &PomodoroTimer,
     theme: &Theme,
     celebration_ticks: u8,
+    auto_start_countdown: u64,
 ) {
     let phase_color = if timer.is_running() {
         get_phase_color(timer.current_timer.phase, theme)
@@ -281,18 +294,15 @@ fn render_timer(
         ])
         .split(area);
 
-    // Big digit clock
     let time_str = timer.current_timer.format_time();
-    let digit_lines = big_digit_lines(&time_str, phase_color);
     f.render_widget(
-        Paragraph::new(digit_lines).alignment(Alignment::Center),
+        Paragraph::new(big_digit_lines(&time_str, phase_color)).alignment(Alignment::Center),
         chunks[1],
     );
 
-    // Progress bar
     render_progress_bar(f, chunks[3], timer, theme);
 
-    // Hint / celebration
+    // Bottom hint line: celebration > auto-start countdown > first-launch hint
     if celebration_ticks > 0 {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -300,6 +310,17 @@ fn render_timer(
                 Style::default()
                     .fg(theme.focus_color)
                     .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            chunks[4],
+        );
+    } else if auto_start_countdown > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("Starting in {}…", auto_start_countdown),
+                Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC),
             )))
             .alignment(Alignment::Center),
             chunks[4],
@@ -328,12 +349,10 @@ fn render_progress_bar(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: 
     };
 
     let progress = timer.current_timer.percentage_complete();
-    // Label visible columns: "  進捗 [PROGRESS]  " ≈ 19 cols
     let label_cols: usize = 19;
     let bar_width = (area.width as usize).saturating_sub(label_cols + 2);
     let filled = (bar_width * progress as usize) / 100;
     let empty = bar_width.saturating_sub(filled).saturating_sub(1);
-
     let bar = format!("{}◯{}", "━".repeat(filled), "─".repeat(empty));
 
     f.render_widget(
@@ -361,6 +380,51 @@ fn render_footer(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme
 fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
     let phase_color = get_phase_color(timer.current_timer.phase, theme);
 
+    // Build a mini bar chart from the weekly data.
+    // Each day gets one column of up to 3 block chars tall.
+    let weekly = &timer.stats.weekly;
+
+    // Only consider days that actually have focus time when computing the scale.
+    // If nobody has any time yet, max_mins stays 0 and all bars are empty.
+    let max_mins = weekly.iter().map(|d| d.focus_mins).max().unwrap_or(0);
+
+    let bar_height = 3usize;
+    let mut chart_rows: Vec<Line> = Vec::new();
+
+    for row in (0..bar_height).rev() {
+        // row 2 (top) fills when day >= 2/3 of max; row 1 >= 1/3; row 0 (bottom) > 0.
+        let spans: Vec<Span> = std::iter::once(Span::styled(" ", Style::default()))
+            .chain(weekly.iter().map(|day| {
+                let filled = if max_mins == 0 {
+                    false
+                } else {
+                    // Each row lights up when the day's minutes exceed that fraction of max.
+                    // row 0 = bottom: any focus time at all
+                    // row 1 = middle: > 1/3 of the best day
+                    // row 2 = top:    > 2/3 of the best day
+                    day.focus_mins * bar_height as u64 > max_mins * row as u64
+                };
+                let color = if filled { phase_color } else { theme.dim };
+                Span::styled(
+                    if filled { "██ " } else { "   " },
+                    Style::default().fg(color),
+                )
+            }))
+            .collect();
+        chart_rows.push(Line::from(spans));
+    }
+
+    // Day labels row
+    let label_spans: Vec<Span> = std::iter::once(Span::styled(" ", Style::default()))
+        .chain(weekly.iter().map(|day| {
+            Span::styled(
+                format!("{} ", &day.label[..2]), // "Mo", "Tu", …
+                Style::default().fg(theme.dim),
+            )
+        }))
+        .collect();
+    chart_rows.push(Line::from(label_spans));
+
     let stats_text = vec![
         Line::from(vec![
             Span::styled(
@@ -369,10 +433,10 @@ fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme)
             ),
             Span::styled("[STATISTICS]", Style::default().fg(theme.text)),
         ]),
-        Line::from(Span::styled(
-            " ━━━━━━━━━━━━",
-            Style::default().fg(theme.border),
-        )),
+        chart_rows[0].clone(),
+        chart_rows[1].clone(),
+        chart_rows[2].clone(),
+        chart_rows[3].clone(),
         Line::from(vec![
             Span::styled(" 今日 ", Style::default().fg(theme.text)),
             Span::styled("[Daily]  ", Style::default().fg(theme.dim)),
@@ -388,16 +452,6 @@ fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme)
             Span::styled("[Done]   ", Style::default().fg(theme.dim)),
             Span::styled(
                 format!("{:02}", timer.stats.sessions_completed),
-                Style::default()
-                    .fg(phase_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" 連勝 ", Style::default().fg(theme.text)),
-            Span::styled("[Streak] ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!("{:02}", timer.cycle_count),
                 Style::default()
                     .fg(phase_color)
                     .add_modifier(Modifier::BOLD),
@@ -465,15 +519,15 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
             key(" ［ｎ］ "),
             desc("作業 [Task]"),
             sep(),
-            key("１２３  "),
-            desc("Profile"),
+            key("［ｖ］ "),
+            desc("履歴 [Hist]"),
         ]),
         Line::from(vec![
             key(" ［ｍ］ "),
             desc("最小 [Min] "),
             sep(),
-            key("［ｑ］ "),
-            desc("終 [Quit]"),
+            key("１２３  "),
+            desc("Profile"),
         ]),
     ];
 
@@ -488,10 +542,104 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
     );
 }
 
+// ─── Session history overlay ──────────────────────────────────────────────────
+
+fn render_history(f: &mut Frame, size: Rect, timer: &PomodoroTimer, theme: &Theme) {
+    let popup_w = size.width.min(62);
+    let sessions = &timer.stats.completed_sessions;
+    // Height: title + divider + up to 12 sessions + empty-state + footer = dynamic
+    let content_rows = (sessions.len().max(1) + 4) as u16;
+    let popup_h = content_rows.min(size.height.saturating_sub(4));
+    let x = (size.width.saturating_sub(popup_w)) / 2;
+    let y = (size.height.saturating_sub(popup_h)) / 2;
+    let area = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, area);
+
+    let dim_s = Style::default().fg(theme.dim);
+    let text_s = Style::default().fg(theme.text);
+    let phase_c = get_phase_color(timer.current_timer.phase, theme);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Today's Sessions",
+            Style::default()
+                .fg(theme.focus_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────────────────",
+            dim_s,
+        )),
+    ];
+
+    if sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No sessions completed yet today.",
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    } else {
+        // Show most recent first, up to 12 entries.
+        let visible: Vec<_> = sessions.iter().rev().take(12).collect();
+        for s in visible {
+            let mins = s.duration_secs / 60;
+            let task_str = s.task.as_deref().unwrap_or("—");
+            let task_display = if task_str.len() > 36 {
+                format!("{}…", &task_str[..35])
+            } else {
+                task_str.to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{}", s.ended_at),
+                    Style::default().fg(phase_c).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("{:>2}m", mins), text_s),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    task_display,
+                    Style::default()
+                        .fg(theme.text)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        if sessions.len() > 12 {
+            lines.push(Line::from(Span::styled(
+                format!("  … and {} more", sessions.len() - 12),
+                dim_s,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Press V to close",
+        Style::default()
+            .fg(theme.dim)
+            .add_modifier(Modifier::ITALIC),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" 履歴 History ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
+    );
+}
+
 // ─── Task input overlay ───────────────────────────────────────────────────────
 
 fn render_task_input(f: &mut Frame, size: Rect, theme: &Theme, buf: &str) {
-    // Centre a 50×7 popup
     let popup_w = size.width.min(54);
     let popup_h = 7u16;
     let x = (size.width.saturating_sub(popup_w)) / 2;
@@ -500,7 +648,6 @@ fn render_task_input(f: &mut Frame, size: Rect, theme: &Theme, buf: &str) {
 
     f.render_widget(Clear, area);
 
-    // Cursor: blinking block appended to the buffer text
     let display = format!("{}▋", buf);
 
     let content = vec![
@@ -640,6 +787,7 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(Span::styled("  Task & Profiles", dim_s)),
         divider(),
         row("N        ", "Set task tag for this session"),
+        row("V        ", "View today's session history"),
         row("1 / 2 / 3", "Switch timer profile"),
         Line::from(""),
         divider(),
@@ -705,6 +853,48 @@ fn render_too_small(f: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
+// ─── Quit confirm popup ───────────────────────────────────────────────────────
+
+fn render_quit_confirm(f: &mut Frame, size: Rect, theme: &Theme, ticks_left: u8) {
+    let popup_w = size.width.min(44);
+    let popup_h = 5u16;
+    let x = (size.width.saturating_sub(popup_w)) / 2;
+    let y = (size.height.saturating_sub(popup_h)) / 2;
+    let area = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, area);
+
+    let content = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Q or Esc again to quit",
+            Style::default()
+                .fg(theme.focus_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Any other key to cancel  ({}s)", ticks_left),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .title(" Quit? ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Double)
+                    .border_style(Style::default().fg(theme.focus_color)),
+            )
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn get_phase_color(phase: TimerPhase, theme: &Theme) -> ratatui::style::Color {
@@ -714,3 +904,7 @@ fn get_phase_color(phase: TimerPhase, theme: &Theme) -> ratatui::style::Color {
         TimerPhase::LongBreak => theme.long_break_color,
     }
 }
+
+// Silence unused import warning — DaySummary is used via timer.stats.weekly
+#[allow(dead_code)]
+fn _use_day_summary(_: &DaySummary) {}

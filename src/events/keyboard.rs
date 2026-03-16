@@ -19,6 +19,8 @@ pub enum Action {
     OpenTaskInput,
     /// Switch to a numbered profile (1-based index)
     SwitchProfile(usize),
+    /// Toggle the session history overlay (V)
+    ToggleHistory,
     None,
 }
 
@@ -35,6 +37,7 @@ pub fn handle_key(key: KeyEvent) -> Action {
         KeyCode::Char('-') | KeyCode::Char('_') => Action::SubtractTime,
         KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleMinimal,
         KeyCode::Char('n') | KeyCode::Char('N') => Action::OpenTaskInput,
+        KeyCode::Char('v') | KeyCode::Char('V') => Action::ToggleHistory,
         // Profile switching: 1, 2, 3 (up to 9)
         KeyCode::Char(c @ '1'..='9') => Action::SwitchProfile((c as usize) - ('0' as usize)),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
