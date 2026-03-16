@@ -1,5 +1,5 @@
+use crate::timer::pomodoro::PhaseEvent;
 use notify_rust::{Notification, Timeout, Urgency};
-use crate::timer::TimerPhase;
 
 pub struct NotificationManager {
     enabled: bool,
@@ -10,26 +10,29 @@ impl NotificationManager {
         Self { enabled }
     }
 
-    pub fn send_phase_complete(&self, phase: TimerPhase) {
+    pub fn send_phase_complete(&self, event: PhaseEvent) {
         if !self.enabled {
             return;
         }
 
-        let (summary, body, urgency) = match phase {
-            TimerPhase::Focus => (
+        let (summary, body, urgency) = match event {
+            PhaseEvent::FocusComplete => (
                 "🍅 Focus Time Complete!",
                 "Great work! Time for a break.",
                 Urgency::Normal,
             ),
-            TimerPhase::ShortBreak => (
-                "☕ Break Over",
-                "Ready to focus again?",
-                Urgency::Normal,
-            ),
-            TimerPhase::LongBreak => (
+            PhaseEvent::ShortBreakComplete => {
+                ("☕ Break Over", "Ready to focus again?", Urgency::Normal)
+            }
+            PhaseEvent::LongBreakComplete => (
                 "🌴 Long Break Complete",
                 "Feeling refreshed? Let's get back to work!",
                 Urgency::Low,
+            ),
+            PhaseEvent::CycleComplete => (
+                "🎉 Cycle Complete!",
+                "Full Pomodoro cycle done. Outstanding focus!",
+                Urgency::Normal,
             ),
         };
 

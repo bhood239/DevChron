@@ -14,8 +14,6 @@ pub enum TimerPhase {
     LongBreak,
 }
 
-impl TimerPhase {}
-
 #[derive(Debug, Clone)]
 pub struct Timer {
     pub phase: TimerPhase,

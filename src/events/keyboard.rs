@@ -7,6 +7,14 @@ pub enum Action {
     Reset,
     Skip,
     ToggleHelp,
+    /// Cycle to the next colour theme (T)
+    CycleTheme,
+    /// Add 5 minutes to the current phase (+)
+    AddTime,
+    /// Subtract 5 minutes from the current phase (-)
+    SubtractTime,
+    /// Toggle minimal mode (M)
+    ToggleMinimal,
     None,
 }
 
@@ -18,6 +26,10 @@ pub fn handle_key(key: KeyEvent) -> Action {
         KeyCode::Char('r') | KeyCode::Char('R') => Action::Reset,
         KeyCode::Char('s') | KeyCode::Char('S') => Action::Skip,
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => Action::ToggleHelp,
+        KeyCode::Char('t') | KeyCode::Char('T') => Action::CycleTheme,
+        KeyCode::Char('+') | KeyCode::Char('=') => Action::AddTime,
+        KeyCode::Char('-') | KeyCode::Char('_') => Action::SubtractTime,
+        KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleMinimal,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         _ => Action::None,
     }

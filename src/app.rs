@@ -1,15 +1,22 @@
 use crate::config::Config;
+use crate::error::Result;
+use crate::hyprland::StatusWriter;
+use crate::notification::NotificationManager;
+use crate::timer::pomodoro::PhaseEvent;
 use crate::timer::PomodoroTimer;
 use crate::ui::Theme;
-use crate::notification::NotificationManager;
-use crate::hyprland::StatusWriter;
-use crate::error::Result;
+
+/// How many render ticks the "CYCLE COMPLETE" celebration banner stays visible.
+const CELEBRATION_TICKS: u8 = 6;
 
 pub struct App {
     pub timer: PomodoroTimer,
     pub theme: Theme,
     pub show_help: bool,
+    pub minimal_mode: bool,
     pub running: bool,
+    /// Counts down from CELEBRATION_TICKS to 0 after a full cycle completes.
+    pub celebration_ticks: u8,
     notification_manager: NotificationManager,
     status_writer: StatusWriter,
 }
@@ -32,7 +39,9 @@ impl App {
             timer,
             theme,
             show_help: false,
+            minimal_mode: false,
             running: true,
+            celebration_ticks: 0,
             notification_manager,
             status_writer,
         })
@@ -49,31 +58,19 @@ impl App {
     }
 
     pub fn skip(&mut self) {
-        let old_phase = self.timer.current_phase();
-        self.timer.skip();
-        self.notification_manager.send_phase_complete(old_phase);
+        let event = self.timer.skip();
+        self.handle_phase_event(event);
         self.update_status();
     }
 
     pub fn tick(&mut self) {
-        let phase_completed = self.timer.tick();
-        if phase_completed {
-            // Get the phase that just completed (before it changed)
-            let completed_phase = match self.timer.current_phase() {
-                crate::timer::TimerPhase::Focus => {
-                    // If we're now in Focus, a break just completed
-                    if self.timer.cycle_count == 0 {
-                        crate::timer::TimerPhase::LongBreak
-                    } else {
-                        crate::timer::TimerPhase::ShortBreak
-                    }
-                }
-                crate::timer::TimerPhase::ShortBreak | crate::timer::TimerPhase::LongBreak => {
-                    // If we're in a break, focus just completed
-                    crate::timer::TimerPhase::Focus
-                }
-            };
-            self.notification_manager.send_phase_complete(completed_phase);
+        // Tick down the celebration banner.
+        if self.celebration_ticks > 0 {
+            self.celebration_ticks -= 1;
+        }
+
+        if let Some(event) = self.timer.tick() {
+            self.handle_phase_event(event);
         }
         self.update_status();
     }
@@ -82,8 +79,38 @@ impl App {
         self.show_help = !self.show_help;
     }
 
+    pub fn toggle_minimal(&mut self) {
+        self.minimal_mode = !self.minimal_mode;
+    }
+
+    pub fn cycle_theme(&mut self) {
+        self.theme = self.theme.cycle_next();
+    }
+
+    pub fn add_time(&mut self) {
+        self.timer.adjust_time(5 * 60);
+        self.update_status();
+    }
+
+    pub fn subtract_time(&mut self) {
+        self.timer.adjust_time(-(5 * 60));
+        self.update_status();
+    }
+
     pub fn quit(&mut self) {
         self.running = false;
+    }
+
+    // ── Private ──────────────────────────────────────────────────────────────
+
+    fn handle_phase_event(&mut self, event: PhaseEvent) {
+        // Send desktop notification for the completed phase.
+        self.notification_manager.send_phase_complete(event);
+
+        // If a full cycle just completed, trigger the celebration banner.
+        if self.timer.cycle_just_completed {
+            self.celebration_ticks = CELEBRATION_TICKS;
+        }
     }
 
     fn update_status(&self) {
