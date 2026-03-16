@@ -69,6 +69,7 @@ pub fn render(
     auto_start_countdown: u64,
     quit_confirm: bool,
     quit_confirm_ticks: u8,
+    sound_enabled: bool,
 ) {
     let size = f.size();
 
@@ -94,6 +95,7 @@ pub fn render(
             profile_name,
             current_task,
             auto_start_countdown,
+            sound_enabled,
         );
     }
 
@@ -120,6 +122,7 @@ fn render_full(
     profile_name: &str,
     current_task: Option<&str>,
     auto_start_countdown: u64,
+    sound_enabled: bool,
 ) {
     let main_block = Block::default()
         .borders(Borders::ALL)
@@ -146,7 +149,7 @@ fn render_full(
         celebration_ticks,
         auto_start_countdown,
     );
-    render_footer(f, chunks[2], timer, theme);
+    render_footer(f, chunks[2], timer, theme, sound_enabled);
 }
 
 // ─── Header ──────────────────────────────────────────────────────────────────
@@ -367,14 +370,20 @@ fn render_progress_bar(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: 
 
 // ─── Footer ───────────────────────────────────────────────────────────────────
 
-fn render_footer(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
+fn render_footer(
+    f: &mut Frame,
+    area: Rect,
+    timer: &PomodoroTimer,
+    theme: &Theme,
+    sound_enabled: bool,
+) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
     render_stats(f, chunks[0], timer, theme);
-    render_controls(f, chunks[1], timer, theme);
+    render_controls(f, chunks[1], timer, theme, sound_enabled);
 }
 
 fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
@@ -470,12 +479,23 @@ fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme)
     );
 }
 
-fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
+fn render_controls(
+    f: &mut Frame,
+    area: Rect,
+    timer: &PomodoroTimer,
+    theme: &Theme,
+    sound_enabled: bool,
+) {
     let phase_color = get_phase_color(timer.current_timer.phase, theme);
     let pause_label = if timer.is_running() {
         "静 [Pause]"
     } else {
         "再開 [Start]"
+    };
+    let sound_label = if sound_enabled {
+        "音 [Sound ✓]"
+    } else {
+        "音 [Sound ✗]"
     };
 
     let key = |k: &'static str| {
@@ -523,8 +543,8 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
             desc("履歴 [Hist]"),
         ]),
         Line::from(vec![
-            key(" ［ｍ］ "),
-            desc("最小 [Min] "),
+            key(" ［ｂ］ "),
+            Span::styled(sound_label, Style::default().fg(theme.text)),
             sep(),
             key("１２３  "),
             desc("Profile"),
@@ -794,6 +814,7 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         Line::from(Span::styled("  Display", dim_s)),
         divider(),
         row("T        ", "Cycle colour theme"),
+        row("B        ", "Toggle sound on/off"),
         row("M        ", "Toggle minimal mode"),
         row("H / ?    ", "Toggle this help screen"),
         Line::from(""),

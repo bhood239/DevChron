@@ -1,6 +1,7 @@
 mod cli;
 mod error;
 mod config;
+mod sound;
 mod timer;
 mod ui;
 mod events;
@@ -167,6 +168,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                 app.auto_start_countdown,
                 app.quit_confirm,
                 app.quit_confirm_ticks,
+                app.sound_enabled,
             );
         })?;
 
@@ -217,6 +219,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                     Action::OpenTaskInput    => app.open_task_input(),
                                     Action::SwitchProfile(i) => app.switch_profile(i),
                                     Action::ToggleHistory    => app.toggle_history(),
+                                    Action::ToggleSound      => app.toggle_sound(),
                                     Action::None             => {}
                                 }
                             }

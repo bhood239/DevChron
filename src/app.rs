@@ -95,6 +95,8 @@ pub struct App {
     auto_start_focus: bool,
     /// Countdown (in ticks) before auto-starting the next phase. 0 = not pending.
     pub auto_start_countdown: u64,
+    /// Whether sound is currently enabled (can be toggled live with B).
+    pub sound_enabled: bool,
 
     notification_manager: NotificationManager,
     status_writer: StatusWriter,
@@ -111,11 +113,16 @@ impl App {
         );
 
         let theme = Theme::from_name(&config.settings.ui.theme);
-        let notification_manager = NotificationManager::new(config.settings.notifications.enabled);
+        let notification_manager = NotificationManager::new(
+            config.settings.notifications.enabled,
+            config.settings.notifications.sound_enabled,
+            config.settings.notifications.sound_volume,
+        );
         let status_writer = StatusWriter::new(config.settings.integrations.hyprland_status_bar)?;
         let profiles = ProfileList::from_config(&config);
         let auto_start_breaks = config.settings.behaviour.auto_start_breaks;
         let auto_start_focus = config.settings.behaviour.auto_start_focus;
+        let sound_enabled = config.settings.notifications.sound_enabled;
 
         Ok(Self {
             timer,
@@ -134,6 +141,7 @@ impl App {
             auto_start_breaks,
             auto_start_focus,
             auto_start_countdown: 0,
+            sound_enabled,
             notification_manager,
             status_writer,
         })
@@ -210,6 +218,11 @@ impl App {
 
     pub fn toggle_history(&mut self) {
         self.show_history = !self.show_history;
+    }
+
+    pub fn toggle_sound(&mut self) {
+        self.sound_enabled = !self.sound_enabled;
+        self.notification_manager.sound.enabled = self.sound_enabled;
     }
 
     pub fn toggle_minimal(&mut self) {

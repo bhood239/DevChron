@@ -128,15 +128,21 @@ pub struct NotificationSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    #[serde(default)]
+    /// Play a chime when each phase completes (default: true).
+    #[serde(default = "default_true")]
     pub sound_enabled: bool,
+
+    /// Sound volume from 0.0 (silent) to 1.0 (full). Default: 0.5.
+    #[serde(default = "default_volume")]
+    pub sound_volume: f32,
 }
 
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            sound_enabled: false,
+            sound_enabled: true,
+            sound_volume: default_volume(),
         }
     }
 }
@@ -214,4 +220,7 @@ fn default_theme() -> String {
 }
 fn default_true() -> bool {
     true
+}
+fn default_volume() -> f32 {
+    0.5
 }
