@@ -1,18 +1,24 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub timer: TimerSettings,
-    
+
     #[serde(default)]
     pub notifications: NotificationSettings,
-    
+
     #[serde(default)]
     pub ui: UiSettings,
-    
+
     #[serde(default)]
     pub integrations: IntegrationSettings,
+
+    /// Named timer profiles. Keys are profile names (e.g. "work", "deep", "quick").
+    /// If empty, a set of built-in defaults is used.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileSettings>,
 }
 
 impl Default for Settings {
@@ -22,21 +28,24 @@ impl Default for Settings {
             notifications: NotificationSettings::default(),
             ui: UiSettings::default(),
             integrations: IntegrationSettings::default(),
+            profiles: BTreeMap::new(),
         }
     }
 }
+
+// ── Timer ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TimerSettings {
     #[serde(default = "default_focus_duration")]
     pub focus_duration: u64,
-    
+
     #[serde(default = "default_short_break")]
     pub short_break_duration: u64,
-    
+
     #[serde(default = "default_long_break")]
     pub long_break_duration: u64,
-    
+
     #[serde(default = "default_cycles")]
     pub cycles_before_long_break: u32,
 }
@@ -52,11 +61,69 @@ impl Default for TimerSettings {
     }
 }
 
+// ── Profile ──────────────────────────────────────────────────────────────────
+
+/// A named timer profile — overrides the base [timer] durations.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProfileSettings {
+    /// Focus duration in minutes.
+    pub focus: u64,
+    /// Short break duration in minutes.
+    pub short_break: u64,
+    /// Long break duration in minutes.
+    pub long_break: u64,
+    /// How many focus sessions before a long break (optional, falls back to [timer] value).
+    pub cycles: Option<u32>,
+}
+
+impl ProfileSettings {
+    /// Built-in "work" profile — classic Pomodoro.
+    pub fn work() -> Self {
+        Self {
+            focus: 25,
+            short_break: 5,
+            long_break: 15,
+            cycles: Some(4),
+        }
+    }
+
+    /// Built-in "deep" profile — longer deep-work blocks.
+    pub fn deep() -> Self {
+        Self {
+            focus: 50,
+            short_break: 10,
+            long_break: 20,
+            cycles: Some(3),
+        }
+    }
+
+    /// Built-in "quick" profile — short sprints.
+    pub fn quick() -> Self {
+        Self {
+            focus: 15,
+            short_break: 3,
+            long_break: 10,
+            cycles: Some(4),
+        }
+    }
+
+    /// Returns the ordered list of built-in profiles used when none are defined in config.
+    pub fn defaults() -> Vec<(String, ProfileSettings)> {
+        vec![
+            ("work".to_string(), Self::work()),
+            ("deep".to_string(), Self::deep()),
+            ("quick".to_string(), Self::quick()),
+        ]
+    }
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotificationSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    
+
     #[serde(default)]
     pub sound_enabled: bool,
 }
@@ -69,6 +136,8 @@ impl Default for NotificationSettings {
         }
     }
 }
+
+// ── UI ────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiSettings {
@@ -84,6 +153,8 @@ impl Default for UiSettings {
     }
 }
 
+// ── Integrations ──────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationSettings {
     #[serde(default = "default_true")]
@@ -98,10 +169,23 @@ impl Default for IntegrationSettings {
     }
 }
 
-// Default value functions
-fn default_focus_duration() -> u64 { 25 }
-fn default_short_break() -> u64 { 5 }
-fn default_long_break() -> u64 { 15 }
-fn default_cycles() -> u32 { 4 }
-fn default_theme() -> String { "nord".to_string() }
-fn default_true() -> bool { true }
+// ── Default value fns ─────────────────────────────────────────────────────────
+
+fn default_focus_duration() -> u64 {
+    25
+}
+fn default_short_break() -> u64 {
+    5
+}
+fn default_long_break() -> u64 {
+    15
+}
+fn default_cycles() -> u32 {
+    4
+}
+fn default_theme() -> String {
+    "nord".to_string()
+}
+fn default_true() -> bool {
+    true
+}

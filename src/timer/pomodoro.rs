@@ -65,8 +65,10 @@ impl PomodoroTimer {
         self.current_timer.reset();
     }
 
+    /// Skip the current phase (no task tag — used for break skips or manual skips).
+    #[allow(dead_code)]
     pub fn skip(&mut self) -> PhaseEvent {
-        self.advance_to_next_phase()
+        self.advance_phase_with_task(None)
     }
 
     /// Advance the timer by one second. Returns a `PhaseEvent` if a phase
@@ -75,11 +77,50 @@ impl PomodoroTimer {
         // Clear the one-frame cycle flag each tick.
         self.cycle_just_completed = false;
 
-        let completed = self.current_timer.tick();
-        if completed {
-            Some(self.advance_to_next_phase())
+        if self.current_timer.tick() {
+            Some(self.advance_phase_with_task(None))
         } else {
             None
+        }
+    }
+
+    /// Complete the current phase, recording an optional task tag for focus sessions.
+    pub fn advance_phase_with_task(&mut self, task: Option<String>) -> PhaseEvent {
+        match self.current_timer.phase {
+            TimerPhase::Focus => {
+                let elapsed = self
+                    .focus_duration
+                    .saturating_sub(self.current_timer.remaining);
+                self.stats.complete_focus_session(elapsed, task);
+                self.cycle_count += 1;
+
+                if self.cycle_count >= self.cycles_before_long_break {
+                    self.cycle_count = 0;
+                    self.cycle_just_completed = true;
+                    self.current_timer =
+                        Timer::new(TimerPhase::LongBreak, self.long_break_duration);
+                } else {
+                    self.current_timer =
+                        Timer::new(TimerPhase::ShortBreak, self.short_break_duration);
+                }
+                PhaseEvent::FocusComplete
+            }
+            TimerPhase::ShortBreak => {
+                let elapsed = self
+                    .short_break_duration
+                    .saturating_sub(self.current_timer.remaining);
+                self.stats.complete_break_session(elapsed);
+                self.current_timer = Timer::new(TimerPhase::Focus, self.focus_duration);
+                PhaseEvent::ShortBreakComplete
+            }
+            TimerPhase::LongBreak => {
+                let elapsed = self
+                    .long_break_duration
+                    .saturating_sub(self.current_timer.remaining);
+                self.stats.complete_break_session(elapsed);
+                self.current_timer = Timer::new(TimerPhase::Focus, self.focus_duration);
+                PhaseEvent::LongBreakComplete
+            }
         }
     }
 
@@ -92,40 +133,21 @@ impl PomodoroTimer {
         self.current_timer.remaining = Duration::from_secs(new_remaining as u64);
     }
 
-    fn advance_to_next_phase(&mut self) -> PhaseEvent {
-        match self.current_timer.phase {
-            TimerPhase::Focus => {
-                self.stats
-                    .complete_focus_session(self.focus_duration - self.current_timer.remaining);
-                self.cycle_count += 1;
-
-                if self.cycle_count >= self.cycles_before_long_break {
-                    self.cycle_count = 0;
-                    self.cycle_just_completed = true;
-                    self.current_timer =
-                        Timer::new(TimerPhase::LongBreak, self.long_break_duration);
-                    PhaseEvent::FocusComplete
-                } else {
-                    self.current_timer =
-                        Timer::new(TimerPhase::ShortBreak, self.short_break_duration);
-                    PhaseEvent::FocusComplete
-                }
-            }
-            TimerPhase::ShortBreak => {
-                self.stats.complete_break_session(
-                    self.short_break_duration - self.current_timer.remaining,
-                );
-                self.current_timer = Timer::new(TimerPhase::Focus, self.focus_duration);
-                PhaseEvent::ShortBreakComplete
-            }
-            TimerPhase::LongBreak => {
-                self.stats.complete_break_session(
-                    self.long_break_duration - self.current_timer.remaining,
-                );
-                self.current_timer = Timer::new(TimerPhase::Focus, self.focus_duration);
-                PhaseEvent::LongBreakComplete
-            }
-        }
+    /// Reset the timer to a new profile's durations, preserving session stats.
+    pub fn apply_profile(
+        &mut self,
+        focus_mins: u64,
+        short_break_mins: u64,
+        long_break_mins: u64,
+        cycles: u32,
+    ) {
+        self.focus_duration = Duration::from_secs(focus_mins * 60);
+        self.short_break_duration = Duration::from_secs(short_break_mins * 60);
+        self.long_break_duration = Duration::from_secs(long_break_mins * 60);
+        self.cycles_before_long_break = cycles;
+        self.cycle_count = 0;
+        // Reset the current timer to the new focus duration.
+        self.current_timer = Timer::new(TimerPhase::Focus, self.focus_duration);
     }
 
     pub fn current_phase(&self) -> TimerPhase {

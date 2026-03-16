@@ -8,37 +8,25 @@ use ratatui::{
     Frame,
 };
 
-// ─── Big-digit block art ────────────────────────────────────────────────────
+// ─── Big-digit block art ─────────────────────────────────────────────────────
 //
-// Each digit is rendered as a 5-row × 4-col pattern using full-block (█) and
-// space characters. The colon separator is 5-row × 2-col.
+// Each digit is a 5-row × 5-col pattern; colon is 5-row × 3-col.
 
 const DIGITS: [&[&str]; 10] = [
-    // 0
-    &["█████", "█   █", "█   █", "█   █", "█████"],
-    // 1
-    &["  █  ", "  █  ", "  █  ", "  █  ", "  █  "],
-    // 2
-    &["█████", "    █", "█████", "█    ", "█████"],
-    // 3
-    &["█████", "    █", "█████", "    █", "█████"],
-    // 4
-    &["█   █", "█   █", "█████", "    █", "    █"],
-    // 5
-    &["█████", "█    ", "█████", "    █", "█████"],
-    // 6
-    &["█████", "█    ", "█████", "█   █", "█████"],
-    // 7
-    &["█████", "    █", "    █", "    █", "    █"],
-    // 8
-    &["█████", "█   █", "█████", "█   █", "█████"],
-    // 9
-    &["█████", "█   █", "█████", "    █", "█████"],
+    &["█████", "█   █", "█   █", "█   █", "█████"], // 0
+    &["  █  ", "  █  ", "  █  ", "  █  ", "  █  "], // 1
+    &["█████", "    █", "█████", "█    ", "█████"], // 2
+    &["█████", "    █", "█████", "    █", "█████"], // 3
+    &["█   █", "█   █", "█████", "    █", "    █"], // 4
+    &["█████", "█    ", "█████", "    █", "█████"], // 5
+    &["█████", "█    ", "█████", "█   █", "█████"], // 6
+    &["█████", "    █", "    █", "    █", "    █"], // 7
+    &["█████", "█   █", "█████", "█   █", "█████"], // 8
+    &["█████", "█   █", "█████", "    █", "█████"], // 9
 ];
 
 const COLON: &[&str] = &["   ", " █ ", "   ", " █ ", "   "];
 
-/// Render a big-digit time string (e.g. "25:04") into a vec of 5 Lines.
 fn big_digit_lines(time_str: &str, color: ratatui::style::Color) -> Vec<Line<'static>> {
     let mut rows: [String; 5] = Default::default();
 
@@ -46,15 +34,14 @@ fn big_digit_lines(time_str: &str, color: ratatui::style::Color) -> Vec<Line<'st
         let pattern: &[&str] = if ch == ':' {
             COLON
         } else if ch.is_ascii_digit() {
-            let d = ch as usize - '0' as usize;
-            DIGITS[d]
+            DIGITS[ch as usize - '0' as usize]
         } else {
             continue;
         };
 
         for (i, row) in pattern.iter().enumerate() {
             rows[i].push_str(row);
-            rows[i].push(' '); // inter-character gap
+            rows[i].push(' ');
         }
     }
 
@@ -68,8 +55,9 @@ fn big_digit_lines(time_str: &str, color: ratatui::style::Color) -> Vec<Line<'st
         .collect()
 }
 
-// ─── Public entry point ─────────────────────────────────────────────────────
+// ─── Public entry point ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     timer: &PomodoroTimer,
@@ -77,10 +65,13 @@ pub fn render(
     show_help: bool,
     minimal_mode: bool,
     celebration_ticks: u8,
+    task_input_buf: Option<&str>,
+    show_task_input: bool,
+    profile_name: &str,
+    current_task: Option<&str>,
 ) {
     let size = f.size();
 
-    // Minimum terminal size guard
     if size.width < 60 || size.height < 16 {
         render_too_small(f, size, theme);
         return;
@@ -93,10 +84,22 @@ pub fn render(
 
     if minimal_mode {
         render_minimal(f, size, timer, theme);
-        return;
+    } else {
+        render_full(
+            f,
+            size,
+            timer,
+            theme,
+            celebration_ticks,
+            profile_name,
+            current_task,
+        );
     }
 
-    render_full(f, size, timer, theme, celebration_ticks);
+    // Task-input overlay renders on top of everything (including minimal mode).
+    if show_task_input {
+        render_task_input(f, size, theme, task_input_buf.unwrap_or(""));
+    }
 }
 
 // ─── Full layout ─────────────────────────────────────────────────────────────
@@ -107,6 +110,8 @@ fn render_full(
     timer: &PomodoroTimer,
     theme: &Theme,
     celebration_ticks: u8,
+    profile_name: &str,
+    current_task: Option<&str>,
 ) {
     let main_block = Block::default()
         .borders(Borders::ALL)
@@ -119,20 +124,27 @@ fn render_full(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(10),   // Timer
-            Constraint::Length(7), // Footer
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(7),
         ])
         .split(inner);
 
-    render_header(f, chunks[0], timer, theme);
+    render_header(f, chunks[0], timer, theme, profile_name, current_task);
     render_timer(f, chunks[1], timer, theme, celebration_ticks);
     render_footer(f, chunks[2], timer, theme);
 }
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 
-fn render_header(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
+fn render_header(
+    f: &mut Frame,
+    area: Rect,
+    timer: &PomodoroTimer,
+    theme: &Theme,
+    profile_name: &str,
+    current_task: Option<&str>,
+) {
     let phase_color = get_phase_color(timer.current_timer.phase, theme);
     let is_paused = !timer.is_running();
 
@@ -142,14 +154,8 @@ fn render_header(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme
         TimerPhase::LongBreak => ("長休憩", "LONG BREAK"),
     };
 
-    let session_text = format!(
-        "{:02}/{:02}",
-        timer.cycle_count + 1,
-        timer.cycles_before_long_break
-    );
-
-    // Row 1: branding │ phase  [PAUSED badge if paused]
-    let mut row1_spans = vec![
+    // Row 1: DevChron │ phase [NAME]  ⏸ PAUSED  ·  task tag
+    let mut row1: Vec<Span> = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
             "DevChron",
@@ -175,7 +181,7 @@ fn render_header(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme
     ];
 
     if is_paused {
-        row1_spans.push(Span::styled(
+        row1.push(Span::styled(
             "  ⏸ PAUSED",
             Style::default()
                 .fg(theme.paused_color)
@@ -183,17 +189,34 @@ fn render_header(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme
         ));
     }
 
-    // Row 3: separator ─── session counter
-    let session_label = format!(
-        " {:02}/{:02} [SESSION] ",
+    // Show active task tag if set (truncated to 28 chars)
+    if let Some(task) = current_task {
+        let truncated = if task.len() > 28 {
+            format!("{}…", &task[..27])
+        } else {
+            task.to_string()
+        };
+        row1.push(Span::styled("  ·  ", Style::default().fg(theme.border)));
+        row1.push(Span::styled(
+            truncated,
+            Style::default()
+                .fg(theme.text)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+
+    // Row 3: ─── separator  session  profile
+    let session_text = format!(
+        "{:02}/{:02}",
         timer.cycle_count + 1,
         timer.cycles_before_long_break
     );
-    let used = session_label.len() + 2;
-    let sep_width = (area.width as usize).saturating_sub(used);
+    let profile_label = format!(" [{}] ", profile_name.to_uppercase());
+    let right_section = format!(" {}  {}{}", session_text, "[SESSION]", profile_label);
+    let sep_width = (area.width as usize).saturating_sub(right_section.len() + 2);
 
     let header_text = vec![
-        Line::from(row1_spans),
+        Line::from(row1),
         Line::from(""),
         Line::from(vec![
             Span::styled(
@@ -207,7 +230,13 @@ fn render_header(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme
                     .fg(phase_color)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" [SESSION] ", Style::default().fg(theme.text)),
+            Span::styled(" [SESSION]", Style::default().fg(theme.text)),
+            Span::styled(
+                profile_label,
+                Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]),
     ];
 
@@ -240,15 +269,14 @@ fn render_timer(
         && timer.current_timer.remaining == timer.current_timer.duration
         && timer.stats.sessions_completed == 0;
 
-    // Layout: padding / big digits (5 rows) / progress bar / hint / padding
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(15),
-            Constraint::Length(5), // Big digit rows
-            Constraint::Length(1), // Spacer
-            Constraint::Length(1), // Progress bar
-            Constraint::Length(1), // Hint / celebration
+            Constraint::Length(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Percentage(15),
         ])
         .split(area);
@@ -256,35 +284,41 @@ fn render_timer(
     // Big digit clock
     let time_str = timer.current_timer.format_time();
     let digit_lines = big_digit_lines(&time_str, phase_color);
-    let time_display = Paragraph::new(digit_lines).alignment(Alignment::Center);
-    f.render_widget(time_display, chunks[1]);
+    f.render_widget(
+        Paragraph::new(digit_lines).alignment(Alignment::Center),
+        chunks[1],
+    );
 
     // Progress bar
     render_progress_bar(f, chunks[3], timer, theme);
 
-    // Hint / celebration line
+    // Hint / celebration
     if celebration_ticks > 0 {
-        let celebration = Paragraph::new(Line::from(Span::styled(
-            "✦  CYCLE COMPLETE  ✦",
-            Style::default()
-                .fg(theme.focus_color)
-                .add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center);
-        f.render_widget(celebration, chunks[4]);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "✦  CYCLE COMPLETE  ✦",
+                Style::default()
+                    .fg(theme.focus_color)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            chunks[4],
+        );
     } else if never_started {
-        let hint = Paragraph::new(Line::from(Span::styled(
-            "Press SPACE to start",
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::ITALIC),
-        )))
-        .alignment(Alignment::Center);
-        f.render_widget(hint, chunks[4]);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Press SPACE to start",
+                Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            )))
+            .alignment(Alignment::Center),
+            chunks[4],
+        );
     }
 }
 
-// ─── Progress bar ────────────────────────────────────────────────────────────
+// ─── Progress bar ─────────────────────────────────────────────────────────────
 
 fn render_progress_bar(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
     let phase_color = if timer.is_running() {
@@ -294,36 +328,30 @@ fn render_progress_bar(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: 
     };
 
     let progress = timer.current_timer.percentage_complete();
-
-    // Label: "進捗 [PROGRESS]  " — measure actual char width
-    let label = "  進捗 [PROGRESS]  ";
-    // Each CJK char is 2 columns wide; ASCII is 1. Approximate:
-    // "  " (2) + "進捗" (4) + " [PROGRESS]  " (13) = 19 visible cols
+    // Label visible columns: "  進捗 [PROGRESS]  " ≈ 19 cols
     let label_cols: usize = 19;
     let bar_width = (area.width as usize).saturating_sub(label_cols + 2);
     let filled = (bar_width * progress as usize) / 100;
     let empty = bar_width.saturating_sub(filled).saturating_sub(1);
 
-    let bar = format!("{}◯{}", "━".repeat(filled), "─".repeat(empty),);
+    let bar = format!("{}◯{}", "━".repeat(filled), "─".repeat(empty));
 
-    let progress_text = vec![Line::from(vec![
-        Span::styled(label, Style::default().fg(theme.text)),
-        Span::styled(bar, Style::default().fg(phase_color)),
-    ])];
-
-    let progress_widget = Paragraph::new(progress_text).alignment(Alignment::Center);
-    f.render_widget(progress_widget, area);
+    f.render_widget(
+        Paragraph::new(vec![Line::from(vec![
+            Span::styled("  進捗 [PROGRESS]  ", Style::default().fg(theme.text)),
+            Span::styled(bar, Style::default().fg(phase_color)),
+        ])])
+        .alignment(Alignment::Center),
+        area,
+    );
 }
 
-// ─── Footer ──────────────────────────────────────────────────────────────────
+// ─── Footer ───────────────────────────────────────────────────────────────────
 
 fn render_footer(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(35), // Statistics
-            Constraint::Percentage(65), // Controls
-        ])
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
     render_stats(f, chunks[0], timer, theme);
@@ -377,14 +405,15 @@ fn render_stats(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme)
         ]),
     ];
 
-    let stats = Paragraph::new(stats_text).block(
-        Block::default()
-            .borders(Borders::RIGHT | Borders::TOP)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(theme.border)),
+    f.render_widget(
+        Paragraph::new(stats_text).block(
+            Block::default()
+                .borders(Borders::RIGHT | Borders::TOP)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
     );
-
-    f.render_widget(stats, area);
 }
 
 fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &Theme) {
@@ -433,32 +462,85 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
             desc("色 [Theme]"),
         ]),
         Line::from(vec![
-            key(" ［＋］ "),
-            desc("+5m      "),
+            key(" ［ｎ］ "),
+            desc("作業 [Task]"),
             sep(),
-            key("［－］ "),
-            desc("-5m      "),
+            key("１２３  "),
+            desc("Profile"),
         ]),
         Line::from(vec![
             key(" ［ｍ］ "),
-            desc("最小 [Minimal]"),
+            desc("最小 [Min] "),
             sep(),
             key("［ｑ］ "),
             desc("終 [Quit]"),
         ]),
     ];
 
-    let controls = Paragraph::new(controls_text).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(theme.border)),
+    f.render_widget(
+        Paragraph::new(controls_text).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
     );
-
-    f.render_widget(controls, area);
 }
 
-// ─── Minimal mode ────────────────────────────────────────────────────────────
+// ─── Task input overlay ───────────────────────────────────────────────────────
+
+fn render_task_input(f: &mut Frame, size: Rect, theme: &Theme, buf: &str) {
+    // Centre a 50×7 popup
+    let popup_w = size.width.min(54);
+    let popup_h = 7u16;
+    let x = (size.width.saturating_sub(popup_w)) / 2;
+    let y = (size.height.saturating_sub(popup_h)) / 2;
+    let area = Rect::new(x, y, popup_w, popup_h);
+
+    f.render_widget(Clear, area);
+
+    // Cursor: blinking block appended to the buffer text
+    let display = format!("{}▋", buf);
+
+    let content = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  What are you working on?",
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                display,
+                Style::default()
+                    .fg(theme.focus_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Enter to confirm · Esc to cancel",
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(content).block(
+            Block::default()
+                .title(" 作業 Task ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(theme.focus_color)),
+        ),
+        area,
+    );
+}
+
+// ─── Minimal mode ─────────────────────────────────────────────────────────────
 
 fn render_minimal(f: &mut Frame, size: Rect, timer: &PomodoroTimer, theme: &Theme) {
     let phase_color = if timer.is_running() {
@@ -474,7 +556,6 @@ fn render_minimal(f: &mut Frame, size: Rect, timer: &PomodoroTimer, theme: &Them
     let inner = outer.inner(size);
     f.render_widget(outer, size);
 
-    // Vertically center the 5-row big digit display
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -486,54 +567,56 @@ fn render_minimal(f: &mut Frame, size: Rect, timer: &PomodoroTimer, theme: &Them
         .split(inner);
 
     let time_str = timer.current_timer.format_time();
-    let digit_lines = big_digit_lines(&time_str, phase_color);
-    let time_display = Paragraph::new(digit_lines).alignment(Alignment::Center);
-    f.render_widget(time_display, chunks[1]);
+    f.render_widget(
+        Paragraph::new(big_digit_lines(&time_str, phase_color)).alignment(Alignment::Center),
+        chunks[1],
+    );
 
-    // Phase indicator below the clock
     let (phase_kanji, phase_name) = match timer.current_timer.phase {
         TimerPhase::Focus => ("焦 点", "FOCUS"),
         TimerPhase::ShortBreak => ("小休憩", "SHORT BREAK"),
         TimerPhase::LongBreak => ("長休憩", "LONG BREAK"),
     };
     let paused_suffix = if !timer.is_running() { "  ⏸" } else { "" };
-    let phase_line = Paragraph::new(Line::from(vec![
-        Span::styled(
-            phase_kanji,
-            Style::default()
-                .fg(phase_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" [{}]{}", phase_name, paused_suffix),
-            Style::default().fg(theme.text),
-        ),
-    ]))
-    .alignment(Alignment::Center);
-    f.render_widget(phase_line, chunks[2]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                phase_kanji,
+                Style::default()
+                    .fg(phase_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" [{}]{}", phase_name, paused_suffix),
+                Style::default().fg(theme.text),
+            ),
+        ]))
+        .alignment(Alignment::Center),
+        chunks[2],
+    );
 }
 
-// ─── Help screen ─────────────────────────────────────────────────────────────
+// ─── Help screen ──────────────────────────────────────────────────────────────
 
 fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
-    // Clear the background first for a clean overlay
     f.render_widget(Clear, area);
 
-    let key_col = Style::default()
+    let key_s = Style::default()
         .fg(theme.focus_color)
         .add_modifier(Modifier::BOLD);
-    let desc_col = Style::default().fg(theme.text);
-    let dim_col = Style::default().fg(theme.dim);
+    let desc_s = Style::default().fg(theme.text);
+    let dim_s = Style::default().fg(theme.dim);
 
     let row = |k: &'static str, d: &'static str| {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(k, key_col),
+            Span::styled(k, key_s),
             Span::styled("  ", Style::default()),
-            Span::styled(d, desc_col),
+            Span::styled(d, desc_s),
         ])
     };
-    let divider = || Line::from(Span::styled("  ─────────────────────────────", dim_col));
+    let divider = || Line::from(Span::styled("  ─────────────────────────────", dim_s));
 
     let help_text = vec![
         Line::from(""),
@@ -545,7 +628,7 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         )),
         Line::from(""),
         divider(),
-        Line::from(Span::styled("  Timer", dim_col)),
+        Line::from(Span::styled("  Timer", dim_s)),
         divider(),
         row("Space / P", "Start / Pause timer"),
         row("R        ", "Reset current phase"),
@@ -554,14 +637,20 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         row("- / _    ", "Subtract 5 minutes"),
         Line::from(""),
         divider(),
-        Line::from(Span::styled("  Display", dim_col)),
+        Line::from(Span::styled("  Task & Profiles", dim_s)),
+        divider(),
+        row("N        ", "Set task tag for this session"),
+        row("1 / 2 / 3", "Switch timer profile"),
+        Line::from(""),
+        divider(),
+        Line::from(Span::styled("  Display", dim_s)),
         divider(),
         row("T        ", "Cycle colour theme"),
         row("M        ", "Toggle minimal mode"),
         row("H / ?    ", "Toggle this help screen"),
         Line::from(""),
         divider(),
-        Line::from(Span::styled("  App", dim_col)),
+        Line::from(Span::styled("  App", dim_s)),
         divider(),
         row("Q / Esc  ", "Quit"),
         Line::from(""),
@@ -573,48 +662,50 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         )),
     ];
 
-    let help = Paragraph::new(help_text)
+    f.render_widget(
+        Paragraph::new(help_text)
+            .block(
+                Block::default()
+                    .title(" Help ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Double)
+                    .border_style(Style::default().fg(theme.border)),
+            )
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+// ─── Too small ────────────────────────────────────────────────────────────────
+
+fn render_too_small(f: &mut Frame, area: Rect, theme: &Theme) {
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Terminal too small",
+                Style::default()
+                    .fg(theme.focus_color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Please resize to at least 60×16",
+                Style::default().fg(theme.text),
+            )),
+        ])
         .block(
             Block::default()
-                .title(" Help ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
                 .border_style(Style::default().fg(theme.border)),
         )
-        .alignment(Alignment::Left);
-
-    f.render_widget(help, area);
+        .alignment(Alignment::Center),
+        area,
+    );
 }
 
-// ─── Too small ───────────────────────────────────────────────────────────────
-
-fn render_too_small(f: &mut Frame, area: Rect, theme: &Theme) {
-    let msg = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "Terminal too small",
-            Style::default()
-                .fg(theme.focus_color)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Please resize to at least 60×16",
-            Style::default().fg(theme.text),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Double)
-            .border_style(Style::default().fg(theme.border)),
-    )
-    .alignment(Alignment::Center);
-
-    f.render_widget(msg, area);
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn get_phase_color(phase: TimerPhase, theme: &Theme) -> ratatui::style::Color {
     match phase {
