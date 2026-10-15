@@ -9,6 +9,9 @@ pub struct Settings {
     pub notifications: NotificationSettings,
     
     #[serde(default)]
+    pub alarm: AlarmSettings,
+
+    #[serde(default)]
     pub ui: UiSettings,
     
     #[serde(default)]
@@ -20,6 +23,7 @@ impl Default for Settings {
         Self {
             timer: TimerSettings::default(),
             notifications: NotificationSettings::default(),
+            alarm: AlarmSettings::default(),
             ui: UiSettings::default(),
             integrations: IntegrationSettings::default(),
         }
@@ -70,6 +74,20 @@ impl Default for NotificationSettings {
     }
 }
 
+/// The alarm that rings when a focus session or break reaches 00:00.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlarmSettings {
+    /// Play the bell chime (terminal bell as fallback) until stopped with `a`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AlarmSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiSettings {
     #[serde(default = "default_theme")]
@@ -103,5 +121,5 @@ fn default_focus_duration() -> u64 { 25 }
 fn default_short_break() -> u64 { 5 }
 fn default_long_break() -> u64 { 15 }
 fn default_cycles() -> u32 { 4 }
-fn default_theme() -> String { "nord".to_string() }
+fn default_theme() -> String { "reef".to_string() }
 fn default_true() -> bool { true }

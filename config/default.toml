@@ -10,8 +10,11 @@ cycles_before_long_break = 4
 enabled = true
 sound_enabled = false
 
+[alarm]
+enabled = true             # bell chime at 00:00, repeating until stopped with A
+
 [ui]
-theme = "nord"  # nord, catppuccin, classic
+theme = "reef"  # reef, daybreak, meadow, tropic, harbor, sorbet
 
 [integrations]
 hyprland_status_bar = true

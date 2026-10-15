@@ -5,10 +5,11 @@ mod ui;
 mod events;
 mod notification;
 mod hyprland;
+mod alarm;
 mod app;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crossterm::{
     event::{self, Event},
     execute,
@@ -18,12 +19,16 @@ use ratatui::{
     backend::CrosstermBackend,
     Terminal,
 };
-use tokio::time::interval;
 
 use app::App;
 use config::Config;
-use events::{handle_key, Action};
+use events::handle_key;
 use error::Result;
+
+/// Longest the UI waits for input before redrawing. Purely a repaint cadence:
+/// the countdown itself is computed from the wall clock, so this value has no
+/// effect on timer accuracy.
+const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,7 +42,7 @@ async fn main() -> Result<()> {
 
     let mut app = App::new(config)?;
 
-    let result = run_app(&mut terminal, &mut app).await;
+    let result = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -46,52 +51,51 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run_app<B: ratatui::backend::Backend>(
+/// Single event loop: advance the timer to "now", draw if anything visible
+/// changed, then wait for input for at most one frame. There is exactly one
+/// loop and no background timers or tasks, so nothing can run twice or keep
+/// running after a mode switch.
+fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<()> {
-    let mut tick_interval = interval(Duration::from_secs(1));
+    // What the last frame showed. The ring moves far less than one dot per
+    // second, so repainting when the displayed second changes keeps it exact
+    // while idling at ~0 % CPU instead of repainting 20 times a second.
+    let mut last_drawn: Option<(u64, bool, Option<bool>)> = None;
+    let mut dirty = true;
 
     loop {
-        terminal.draw(|f| {
-            ui::render(
-                f,
-                &app.timer,
-                &app.theme,
-                app.show_help,
-                app.minimal_mode,
-                app.celebration_ticks,
-            );
-        })?;
+        let now = Instant::now();
+        app.tick(now);
 
-        tokio::select! {
-            _ = tick_interval.tick() => {
-                app.tick();
-            }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if event::poll(Duration::from_millis(0))? {
-                    match event::read()? {
-                        Event::Key(key) => {
-                            let action = handle_key(key);
-                            match action {
-                                Action::Quit           => app.quit(),
-                                Action::TogglePause    => app.toggle_pause(),
-                                Action::Reset          => app.reset(),
-                                Action::Skip           => app.skip(),
-                                Action::ToggleHelp     => app.toggle_help(),
-                                Action::CycleTheme     => app.cycle_theme(),
-                                Action::AddTime        => app.add_time(),
-                                Action::SubtractTime   => app.subtract_time(),
-                                Action::ToggleMinimal  => app.toggle_minimal(),
-                                Action::None           => {}
-                            }
-                        }
-                        // Redraw immediately on terminal resize
-                        Event::Resize(_, _) => {
-                            terminal.autoresize()?;
-                        }
-                        _ => {}
+        let view = app.view(now);
+        let shown = (
+            app.timer.current_timer.remaining_secs_ceil(),
+            view.celebrating,
+            // Repaint when the alarm flash toggles (twice a second).
+            view.alarm_ringing.then_some(view.alarm_flash),
+        );
+        if dirty || last_drawn != Some(shown) {
+            terminal.draw(|f| ui::render(f, &app.view(now)))?;
+            last_drawn = Some(shown);
+            dirty = false;
+        }
+
+        if event::poll(FRAME_INTERVAL)? {
+            // Handle everything that is already queued before redrawing.
+            loop {
+                match event::read()? {
+                    Event::Key(key) => app.handle_action(handle_key(key)),
+                    // Redraw immediately on terminal resize
+                    Event::Resize(_, _) => {
+                        terminal.autoresize()?;
                     }
+                    _ => {}
+                }
+                dirty = true;
+                if !event::poll(Duration::ZERO)? {
+                    break;
                 }
             }
         }
