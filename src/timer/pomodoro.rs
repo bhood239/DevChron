@@ -1,6 +1,6 @@
 use super::mode::PomodoroMode;
 use super::session::SessionStats;
-use super::state::{Timer, TimerPhase, TimerState};
+use super::state::{FocusCategory, Timer, TimerPhase, TimerState};
 use std::time::{Duration, Instant};
 
 /// Events emitted by the timer when a phase completes.
@@ -24,6 +24,8 @@ pub struct PomodoroTimer {
     pub cycles_before_long_break: u32,
     /// The mode whose durations are currently in effect.
     pub mode: PomodoroMode,
+    /// Active focus category ("Coding", "Learning", "Reading").
+    pub category: FocusCategory,
     pub focus_duration: Duration,
     pub short_break_duration: Duration,
     pub long_break_duration: Duration,
@@ -51,6 +53,7 @@ impl PomodoroTimer {
             cycle_count: 0,
             cycles_before_long_break,
             mode,
+            category: FocusCategory::default(),
             focus_duration: mode.focus(),
             short_break_duration: mode.short_break(),
             long_break_duration: mode.long_break(),
@@ -81,7 +84,11 @@ impl PomodoroTimer {
             let elapsed = self
                 .focus_duration
                 .saturating_sub(self.current_timer.remaining);
-            self.stats.record_abandoned_focus(elapsed, self.mode.name);
+            self.stats.record_abandoned_focus_with_category(
+                elapsed,
+                self.mode.name,
+                self.category.label(),
+            );
         }
         self.alarm_ringing = false;
         self.current_timer.reset();
@@ -89,6 +96,56 @@ impl PomodoroTimer {
 
     pub fn skip(&mut self) -> PhaseEvent {
         self.advance_to_next_phase()
+    }
+
+    /// Directly choose between Focus, Short Break, and Long Break on the timer page.
+    /// Leaves the newly selected phase paused at its full length for the current mode.
+    pub fn set_phase(&mut self, phase: TimerPhase) {
+        if self.current_timer.phase == phase
+            && !self.current_timer.has_progress()
+            && !self.current_timer.is_running()
+            && !self.alarm_ringing
+        {
+            return;
+        }
+
+        if self.current_timer.phase == TimerPhase::Focus
+            && self.current_timer.has_progress()
+            && !self.alarm_ringing
+        {
+            let elapsed = self
+                .focus_duration
+                .saturating_sub(self.current_timer.remaining);
+            self.stats.record_abandoned_focus_with_category(
+                elapsed,
+                self.mode.name,
+                self.category.label(),
+            );
+        }
+
+        self.alarm_ringing = false;
+        self.cycle_just_completed = false;
+        self.current_timer = Timer::new(phase, self.duration_for(phase));
+    }
+
+    /// Toggle to Break time: selects Short Break when currently in Focus or Long Break,
+    /// or switches to Long Break when already in Short Break.
+    pub fn toggle_break_phase(&mut self) {
+        let target = match self.current_timer.phase {
+            TimerPhase::ShortBreak => TimerPhase::LongBreak,
+            TimerPhase::Focus | TimerPhase::LongBreak => TimerPhase::ShortBreak,
+        };
+        self.set_phase(target);
+    }
+
+    /// Cycle the active focus category (`Coding` -> `Learning` -> `Reading` -> `Coding`).
+    pub fn cycle_category(&mut self) {
+        self.category = self.category.cycle_next();
+    }
+
+    #[allow(dead_code)]
+    pub fn set_category(&mut self, category: FocusCategory) {
+        self.category = category;
     }
 
     /// Account for the time elapsed up to `now`. Returns a `PhaseEvent` if a
@@ -159,7 +216,11 @@ impl PomodoroTimer {
             let elapsed = self
                 .focus_duration
                 .saturating_sub(self.current_timer.remaining);
-            self.stats.record_abandoned_focus(elapsed, self.mode.name);
+            self.stats.record_abandoned_focus_with_category(
+                elapsed,
+                self.mode.name,
+                self.category.label(),
+            );
         }
 
         self.mode = mode;
@@ -189,8 +250,12 @@ impl PomodoroTimer {
                 let elapsed = self
                     .focus_duration
                     .saturating_sub(self.current_timer.remaining);
-                self.stats
-                    .record_focus_phase(elapsed, self.mode.name, reached_zero);
+                self.stats.record_focus_phase_with_category(
+                    elapsed,
+                    self.mode.name,
+                    self.category.label(),
+                    reached_zero,
+                );
                 self.cycle_count += 1;
 
                 if self.cycle_count >= self.cycles_before_long_break {
@@ -282,11 +347,46 @@ mod tests {
         for mode in MODES {
             let t = timer(*mode);
             assert_eq!(t.current_phase(), TimerPhase::Focus);
+            assert_eq!(t.category, FocusCategory::Coding);
             assert_eq!(t.current_timer.remaining, mode.focus());
             assert_eq!(t.current_timer.duration, mode.focus());
             assert!(!t.is_running());
             assert_eq!(t.current_timer.progress(), 0.0);
         }
+    }
+
+    #[test]
+    fn choosing_phase_switches_between_focus_short_break_and_long_break() {
+        let mut t = timer(MODES[0]);
+        assert_eq!(t.current_phase(), TimerPhase::Focus);
+
+        t.toggle_break_phase();
+        assert_eq!(t.current_phase(), TimerPhase::ShortBreak);
+        assert_eq!(t.current_timer.remaining, 5 * MIN);
+        assert!(!t.is_running());
+
+        t.toggle_break_phase();
+        assert_eq!(t.current_phase(), TimerPhase::LongBreak);
+        assert_eq!(t.current_timer.remaining, 15 * MIN);
+
+        t.set_phase(TimerPhase::Focus);
+        assert_eq!(t.current_phase(), TimerPhase::Focus);
+        assert_eq!(t.current_timer.remaining, 25 * MIN);
+    }
+
+    #[test]
+    fn completed_focus_records_selected_category_in_stats() {
+        let mut t = timer(MODES[0]);
+        let mut now = Instant::now();
+        t.cycle_category(); // Coding -> Learning
+        assert_eq!(t.category, FocusCategory::Learning);
+        finish_phase(&mut t, &mut now);
+        assert_eq!(
+            t.stats.category_focus_secs.get("Learning"),
+            Some(&(25 * 60))
+        );
+        assert_eq!(t.stats.category_sessions.get("Learning"), Some(&1));
+        assert_eq!(t.stats.recent_log.last().unwrap().category, "Learning");
     }
 
     #[test]

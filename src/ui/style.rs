@@ -4,8 +4,9 @@
 //! - At most one `BorderType::Rounded` outer frame per screen (plus modal dialogs).
 //! - Never nest bordered boxes inside bordered boxes; separate inner sections
 //!   with whitespace or a single quiet rule in `theme.border`.
-//! - Clear typographic hierarchy: headline numbers are bold, labels and section
-//!   titles are `theme.dim` (never bold), and secondary text is regular weight.
+//! - Vibrant typographic hierarchy: headline numbers shine in semantic accent
+//!   hues, section titles use `theme.section_accent`, labels use `theme.dim`,
+//!   and right-hand callout notes highlight key takeaways in `theme.gold`.
 //! - Foreground colours only (no opaque background fills) so Hyprland
 //!   transparency and blur work naturally.
 
@@ -40,9 +41,16 @@ pub fn body(theme: &Theme) -> Style {
     Style::default().fg(theme.text)
 }
 
-/// Quiet label, section title, or secondary metadata (`dim`, never bold).
+/// Quiet label or secondary metadata (`dim`, never bold).
 pub fn label(theme: &Theme) -> Style {
     Style::default().fg(theme.dim)
+}
+
+/// Section header title style (`section_accent` + bold).
+pub fn section_title(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.section_accent)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Subtle structural line or divider (`border`, never bold).
@@ -88,11 +96,30 @@ pub fn inset(area: Rect, pad_x: u16, pad_y: u16) -> Rect {
     }
 }
 
-/// Quiet section header: plain dim title followed by a subtle horizontal rule.
-pub fn section_header(title: &str, right_note: Option<&str>, width: u16, theme: &Theme) -> Line<'static> {
+/// Vibrant section header: ice-blue section title, subtle horizontal rule,
+/// and warm gold right-hand callout badge.
+pub fn section_header(
+    title: &str,
+    right_note: Option<&str>,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    section_header_colored(title, theme.section_accent, right_note, theme.gold, width, theme)
+}
+
+/// Section header with custom title and right-note accent colours.
+pub fn section_header_colored(
+    title: &str,
+    title_col: Color,
+    right_note: Option<&str>,
+    note_col: Color,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
     let w = width as usize;
     let title_str = format!("{title} ");
     let title_len = title_str.chars().count();
+    let t_style = Style::default().fg(title_col).add_modifier(Modifier::BOLD);
 
     if let Some(note) = right_note {
         let note_str = format!(" {note}");
@@ -100,16 +127,16 @@ pub fn section_header(title: &str, right_note: Option<&str>, width: u16, theme: 
         if title_len + note_len + 2 <= w {
             let rule_len = w - title_len - note_len;
             return Line::from(vec![
-                Span::styled(title_str, label(theme)),
+                Span::styled(title_str, t_style),
                 Span::styled("─".repeat(rule_len), rule_style(theme)),
-                Span::styled(note_str, label(theme)),
+                Span::styled(note_str, Style::default().fg(note_col)),
             ]);
         }
     }
 
     let rule_len = w.saturating_sub(title_len);
     Line::from(vec![
-        Span::styled(title_str, label(theme)),
+        Span::styled(title_str, t_style),
         Span::styled("─".repeat(rule_len), rule_style(theme)),
     ])
 }
@@ -130,6 +157,14 @@ pub fn keycap_bar<'a>(
     accent: Color,
     theme: &Theme,
 ) -> Line<'static> {
+    let palette = [
+        accent,
+        theme.gold,
+        theme.cyan,
+        theme.emerald,
+        theme.long_break_color,
+        theme.rose,
+    ];
     let gap = 3usize;
     let width_of = |list: &[(&str, &str)]| -> usize {
         list.iter()
@@ -151,7 +186,8 @@ pub fn keycap_bar<'a>(
         if i > 0 {
             spans.push(Span::raw("   "));
         }
-        spans.push(Span::styled(k.to_string(), keycap(accent)));
+        let col = palette[i % palette.len()];
+        spans.push(Span::styled(k.to_string(), keycap(col)));
         spans.push(Span::styled(format!(" {d}"), label(theme)));
     }
     Line::from(spans)

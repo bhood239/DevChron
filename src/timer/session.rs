@@ -1,3 +1,4 @@
+use super::state::FocusCategory;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -8,7 +9,20 @@ use std::time::Duration;
 pub const YEAR_DAYS: usize = 365;
 pub const GRID_WEEKS: usize = 53;
 pub const GRID_DAYS_PER_WEEK: usize = 7;
-pub const MAX_FLIGHT_LOG: usize = 24;
+pub const MAX_FLIGHT_LOG: usize = 48;
+
+fn default_flight_category() -> String {
+    "Coding".to_string()
+}
+
+/// Map a category name to its index `0 = Coding, 1 = Learning, 2 = Reading`.
+pub fn category_index(name: &str) -> usize {
+    match FocusCategory::from_name(name) {
+        FocusCategory::Coding => 0,
+        FocusCategory::Learning => 1,
+        FocusCategory::Reading => 2,
+    }
+}
 
 /// Daily focus record stored per ISO date ("YYYY-MM-DD").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +31,49 @@ pub struct DailyStat {
     pub sessions: u32,
     #[serde(default)]
     pub break_secs: u64,
+    #[serde(default)]
+    pub coding_secs: u64,
+    #[serde(default)]
+    pub learning_secs: u64,
+    #[serde(default)]
+    pub reading_secs: u64,
+}
+
+impl DailyStat {
+    /// Returns `[coding_secs, learning_secs, reading_secs]`, automatically
+    /// attributing any legacy uncategorized `focus_secs` to `Coding`.
+    pub fn category_split(self) -> [u64; 3] {
+        let cat_sum = self
+            .coding_secs
+            .saturating_add(self.learning_secs)
+            .saturating_add(self.reading_secs);
+        let uncategorized = self.focus_secs.saturating_sub(cat_sum);
+        [
+            self.coding_secs.saturating_add(uncategorized),
+            self.learning_secs,
+            self.reading_secs,
+        ]
+    }
+
+    /// Dominant category for this day (defaults to `Coding` when tied or zero).
+    pub fn dominant_category(self) -> FocusCategory {
+        let [c, l, r] = self.category_split();
+        if l > c && l >= r {
+            FocusCategory::Learning
+        } else if r > c && r > l {
+            FocusCategory::Reading
+        } else {
+            FocusCategory::Coding
+        }
+    }
+
+    pub fn add_category_secs(&mut self, category_name: &str, secs: u64) {
+        match category_index(category_name) {
+            0 => self.coding_secs = self.coding_secs.saturating_add(secs),
+            1 => self.learning_secs = self.learning_secs.saturating_add(secs),
+            _ => self.reading_secs = self.reading_secs.saturating_add(secs),
+        }
+    }
 }
 
 /// One chronological entry in the Session Flight Log audit trail.
@@ -28,28 +85,55 @@ pub struct FlightLogEntry {
     pub phase: String,
     /// Mode name e.g. "Classic", "Session", "Extended"
     pub mode: String,
+    /// Focus category ("Coding", "Learning", "Reading") or "—" for breaks
+    #[serde(default = "default_flight_category")]
+    pub category: String,
     /// Elapsed duration in seconds
     pub duration_secs: u64,
     /// Outcome e.g. "COMPLETE", "SKIPPED", "ABORTED", "RESTED"
     pub status: String,
 }
 
-/// Aggregated weekday telemetry (Mon=0 .. Sun=6).
+/// Aggregated weekday telemetry (Mon=0 .. Sun=6), including per-category split.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct WeekdayStat {
     pub weekday_index: usize,
     pub focus_secs: u64,
     pub sessions: u32,
     pub active_days: u32,
     pub avg_active_secs: u64,
+    /// `[coding_secs, learning_secs, reading_secs]`
+    pub cat_secs: [u64; 3],
 }
 
 /// Aggregated Pomodoro mode telemetry.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub struct ModeStat {
     pub name: String,
     pub focus_secs: u64,
     pub sessions: u32,
+    pub share_pct: f64,
+}
+
+/// Rich per-category analytics for `Coding`, `Learning`, and `Reading`.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct CategoryStat {
+    pub category: FocusCategory,
+    pub name: String,
+    pub focus_secs: u64,
+    pub today_secs: u64,
+    pub week_secs: u64,
+    pub sessions: u32,
+    pub interrupted: u32,
+    pub completion_pct: f64,
+    pub avg_session_secs: u64,
+    pub active_days: u32,
+    pub current_streak: u32,
+    pub best_weekday: Option<usize>,
+    pub peak_hour: Option<usize>,
     pub share_pct: f64,
 }
 
@@ -69,12 +153,27 @@ struct PersistedStats {
     /// Cumulative focus seconds by hour of day (24 slots, 00h..23h).
     #[serde(default)]
     hourly_focus_secs: Vec<u64>,
+    #[serde(default)]
+    hourly_coding_secs: Vec<u64>,
+    #[serde(default)]
+    hourly_learning_secs: Vec<u64>,
+    #[serde(default)]
+    hourly_reading_secs: Vec<u64>,
     /// Cumulative focus seconds per Pomodoro mode ("Classic", "Session", "Extended").
     #[serde(default)]
     mode_focus_secs: BTreeMap<String, u64>,
     /// Completed focus sessions per Pomodoro mode.
     #[serde(default)]
     mode_sessions: BTreeMap<String, u32>,
+    /// Cumulative focus seconds per focus category ("Coding", "Learning", "Reading").
+    #[serde(default)]
+    category_focus_secs: BTreeMap<String, u64>,
+    /// Completed focus sessions per focus category.
+    #[serde(default)]
+    category_sessions: BTreeMap<String, u32>,
+    /// Interrupted focus sessions per focus category.
+    #[serde(default)]
+    category_interrupted: BTreeMap<String, u32>,
     /// Total focus sessions completed all the way to 00:00 (or finished).
     #[serde(default)]
     completed_focus_count: u32,
@@ -162,10 +261,14 @@ impl SystemIdentity {
 
 /// One cell in the 53-week × 7-day LeetCode-style yearly focus grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct DayCell {
     pub date: NaiveDate,
     pub focus_secs: u64,
     pub sessions: u32,
+    /// `[coding_secs, learning_secs, reading_secs]`
+    pub cat_secs: [u64; 3],
+    pub dominant_category: FocusCategory,
     /// True if `date` falls within the 365-day window ending on `today`.
     pub in_year_window: bool,
 }
@@ -177,6 +280,7 @@ pub struct AnalyticsSummary {
     pub today_date: NaiveDate,
     pub today_focus_secs: u64,
     pub today_sessions: u32,
+    pub today_cat_secs: [u64; 3],
     pub year_focus_secs: u64,
     pub year_break_secs: u64,
     pub year_sessions: u32,
@@ -203,14 +307,18 @@ pub struct AnalyticsSummary {
     pub weeks: Vec<[DayCell; GRID_DAYS_PER_WEEK]>,
     /// `(week_column_index, month_short_name)` for the month header above the grid.
     pub month_labels: Vec<(usize, &'static str)>,
-    /// Last 7 calendar days `(date, focus_secs, sessions)` ending on `today`.
-    pub last_7_days: Vec<(NaiveDate, u64, u32)>,
+    /// Last 7 calendar days `(date, focus_secs, sessions, [coding, learning, reading])` ending on `today`.
+    pub last_7_days: Vec<(NaiveDate, u64, u32, [u64; 3])>,
     /// 24-hour diurnal focus distribution (`00h..=23h`).
     pub hourly_focus_secs: [u64; 24],
+    /// 24-hour per-category focus distribution (`[coding, learning, reading]` for each hour).
+    pub hourly_cat_secs: [[u64; 3]; 24],
     /// Hour of day (`0..24`) with highest focus activity, if any.
     pub peak_hour: Option<usize>,
     /// Chronotype split percentages: `(morning_06_12, afternoon_12_18, evening_18_24, night_00_06)`.
     pub chronotype_pcts: (f64, f64, f64, f64),
+    /// Per-category seconds in each chronotype window `[morning, afternoon, evening, night]`.
+    pub chronotype_cat_secs: [[u64; 3]; 4],
     /// Day-of-week rhythm across Mon (0) .. Sun (6).
     pub weekday_stats: [WeekdayStat; 7],
     /// Index (`0..7`) of the most productive day of the week, if any.
@@ -222,14 +330,18 @@ pub struct AnalyticsSummary {
     pub cycles_completed: u32,
     /// Mode distribution across Classic, Session, Extended.
     pub mode_stats: Vec<ModeStat>,
+    /// Rich Category analytics across Coding, Learning, Reading.
+    pub category_stats: Vec<CategoryStat>,
+    /// Name of the category with the highest focus time, if any.
+    pub top_category: Option<String>,
     /// Discipline & completion telemetry.
     pub completed_focus_count: u32,
     pub interrupted_focus_count: u32,
     pub completion_rate_pct: f64,
     /// Recent session flight log (newest first).
     pub recent_log: Vec<FlightLogEntry>,
-    /// Last 6 months velocity `(month_label, focus_secs, sessions)`.
-    pub monthly_velocity: Vec<(String, u64, u32)>,
+    /// Last 6 months velocity `(month_label, focus_secs, sessions, [coding, learning, reading])`.
+    pub monthly_velocity: Vec<(String, u64, u32, [u64; 3])>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,8 +354,12 @@ pub struct SessionStats {
     pub session_start: Option<DateTime<Local>>,
     pub history: BTreeMap<String, DailyStat>,
     pub hourly_focus_secs: [u64; 24],
+    pub hourly_cat_secs: [[u64; 3]; 24],
     pub mode_focus_secs: BTreeMap<String, u64>,
     pub mode_sessions: BTreeMap<String, u32>,
+    pub category_focus_secs: BTreeMap<String, u64>,
+    pub category_sessions: BTreeMap<String, u32>,
+    pub category_interrupted: BTreeMap<String, u32>,
     pub completed_focus_count: u32,
     pub interrupted_focus_count: u32,
     pub cycles_completed: u32,
@@ -276,8 +392,12 @@ impl SessionStats {
             session_start: None,
             history: BTreeMap::new(),
             hourly_focus_secs: [0; 24],
+            hourly_cat_secs: [[0; 3]; 24],
             mode_focus_secs: BTreeMap::new(),
             mode_sessions: BTreeMap::new(),
+            category_focus_secs: BTreeMap::new(),
+            category_sessions: BTreeMap::new(),
+            category_interrupted: BTreeMap::new(),
             completed_focus_count: 0,
             interrupted_focus_count: 0,
             cycles_completed: 0,
@@ -323,8 +443,12 @@ impl SessionStats {
             session_start: None,
             history: BTreeMap::new(),
             hourly_focus_secs: [0; 24],
+            hourly_cat_secs: [[0; 3]; 24],
             mode_focus_secs: BTreeMap::new(),
             mode_sessions: BTreeMap::new(),
+            category_focus_secs: BTreeMap::new(),
+            category_sessions: BTreeMap::new(),
+            category_interrupted: BTreeMap::new(),
             completed_focus_count: 0,
             interrupted_focus_count: 0,
             cycles_completed: 0,
@@ -370,6 +494,16 @@ impl SessionStats {
         for (i, &v) in persisted.hourly_focus_secs.iter().take(24).enumerate() {
             hourly[i] = v;
         }
+        let mut hourly_cat = [[0u64; 3]; 24];
+        for (i, &v) in persisted.hourly_coding_secs.iter().take(24).enumerate() {
+            hourly_cat[i][0] = v;
+        }
+        for (i, &v) in persisted.hourly_learning_secs.iter().take(24).enumerate() {
+            hourly_cat[i][1] = v;
+        }
+        for (i, &v) in persisted.hourly_reading_secs.iter().take(24).enumerate() {
+            hourly_cat[i][2] = v;
+        }
 
         base.total_focus_time = today_focus_time;
         base.sessions_completed = today_sessions;
@@ -377,8 +511,12 @@ impl SessionStats {
         base.today_sessions = today_sessions;
         base.history = history;
         base.hourly_focus_secs = hourly;
+        base.hourly_cat_secs = hourly_cat;
         base.mode_focus_secs = persisted.mode_focus_secs;
         base.mode_sessions = persisted.mode_sessions;
+        base.category_focus_secs = persisted.category_focus_secs;
+        base.category_sessions = persisted.category_sessions;
+        base.category_interrupted = persisted.category_interrupted;
         base.completed_focus_count = persisted.completed_focus_count;
         base.interrupted_focus_count = persisted.interrupted_focus_count;
         base.cycles_completed = persisted.cycles_completed;
@@ -398,8 +536,14 @@ impl SessionStats {
             today_sessions: self.today_sessions,
             history: self.history.clone(),
             hourly_focus_secs: self.hourly_focus_secs.to_vec(),
+            hourly_coding_secs: self.hourly_cat_secs.iter().map(|c| c[0]).collect(),
+            hourly_learning_secs: self.hourly_cat_secs.iter().map(|c| c[1]).collect(),
+            hourly_reading_secs: self.hourly_cat_secs.iter().map(|c| c[2]).collect(),
             mode_focus_secs: self.mode_focus_secs.clone(),
             mode_sessions: self.mode_sessions.clone(),
+            category_focus_secs: self.category_focus_secs.clone(),
+            category_sessions: self.category_sessions.clone(),
+            category_interrupted: self.category_interrupted.clone(),
             completed_focus_count: self.completed_focus_count,
             interrupted_focus_count: self.interrupted_focus_count,
             cycles_completed: self.cycles_completed,
@@ -440,18 +584,30 @@ impl SessionStats {
         self.complete_focus_session_with_details(date, 10, duration, "Classic", true);
     }
 
+    #[allow(dead_code)]
     pub fn record_focus_phase(
         &mut self,
         duration: Duration,
         mode_name: &str,
         reached_zero: bool,
     ) {
+        self.record_focus_phase_with_category(duration, mode_name, "Coding", reached_zero);
+    }
+
+    pub fn record_focus_phase_with_category(
+        &mut self,
+        duration: Duration,
+        mode_name: &str,
+        category_name: &str,
+        reached_zero: bool,
+    ) {
         let now = Local::now();
-        self.complete_focus_session_with_details(
+        self.complete_focus_session_with_category(
             now.date_naive(),
             now.hour() as usize,
             duration,
             mode_name,
+            category_name,
             reached_zero,
         );
     }
@@ -464,6 +620,25 @@ impl SessionStats {
         mode_name: &str,
         reached_zero: bool,
     ) {
+        self.complete_focus_session_with_category(
+            date,
+            hour,
+            duration,
+            mode_name,
+            "Coding",
+            reached_zero,
+        );
+    }
+
+    pub fn complete_focus_session_with_category(
+        &mut self,
+        date: NaiveDate,
+        hour: usize,
+        duration: Duration,
+        mode_name: &str,
+        category_name: &str,
+        reached_zero: bool,
+    ) {
         self.sessions_completed += 1;
         self.today_sessions += 1;
         self.total_focus_time += duration;
@@ -473,10 +648,15 @@ impl SessionStats {
         let key = Self::format_date(date);
         let entry = self.history.entry(key).or_default();
         entry.focus_secs = entry.focus_secs.saturating_add(secs);
+        entry.add_category_secs(category_name, secs);
+
         if duration > Duration::ZERO {
             entry.sessions = entry.sessions.saturating_add(1);
-            self.hourly_focus_secs[hour % 24] =
-                self.hourly_focus_secs[hour % 24].saturating_add(secs);
+            let h = hour % 24;
+            self.hourly_focus_secs[h] = self.hourly_focus_secs[h].saturating_add(secs);
+            let c_idx = category_index(category_name);
+            self.hourly_cat_secs[h][c_idx] = self.hourly_cat_secs[h][c_idx].saturating_add(secs);
+
             *self
                 .mode_focus_secs
                 .entry(mode_name.to_string())
@@ -485,17 +665,30 @@ impl SessionStats {
                 .mode_sessions
                 .entry(mode_name.to_string())
                 .or_insert(0) += 1;
+            *self
+                .category_focus_secs
+                .entry(category_name.to_string())
+                .or_insert(0) += secs;
+            *self
+                .category_sessions
+                .entry(category_name.to_string())
+                .or_insert(0) += 1;
 
             if reached_zero {
                 self.completed_focus_count = self.completed_focus_count.saturating_add(1);
             } else {
                 self.interrupted_focus_count = self.interrupted_focus_count.saturating_add(1);
+                *self
+                    .category_interrupted
+                    .entry(category_name.to_string())
+                    .or_insert(0) += 1;
             }
 
             self.push_log(FlightLogEntry {
                 timestamp: Self::now_timestamp(),
                 phase: "FOCUS".to_string(),
                 mode: mode_name.to_string(),
+                category: category_name.to_string(),
                 duration_secs: secs,
                 status: if reached_zero {
                     "COMPLETE".to_string()
@@ -508,15 +701,30 @@ impl SessionStats {
         self.persist();
     }
 
+    #[allow(dead_code)]
     pub fn record_abandoned_focus(&mut self, duration: Duration, mode_name: &str) {
+        self.record_abandoned_focus_with_category(duration, mode_name, "Coding");
+    }
+
+    pub fn record_abandoned_focus_with_category(
+        &mut self,
+        duration: Duration,
+        mode_name: &str,
+        category_name: &str,
+    ) {
         if duration.is_zero() {
             return;
         }
         self.interrupted_focus_count = self.interrupted_focus_count.saturating_add(1);
+        *self
+            .category_interrupted
+            .entry(category_name.to_string())
+            .or_insert(0) += 1;
         self.push_log(FlightLogEntry {
             timestamp: Self::now_timestamp(),
             phase: "FOCUS".to_string(),
             mode: mode_name.to_string(),
+            category: category_name.to_string(),
             duration_secs: duration.as_secs(),
             status: "ABORTED".to_string(),
         });
@@ -545,6 +753,7 @@ impl SessionStats {
                 timestamp: Self::now_timestamp(),
                 phase: phase_label.to_string(),
                 mode: mode_name.to_string(),
+                category: "—".to_string(),
                 duration_secs: secs,
                 status: "RESTED".to_string(),
             });
@@ -579,8 +788,6 @@ impl SessionStats {
     }
 
     /// Proportional intensity in `0.0..=1.0` for `focus_secs` relative to `max_daily_secs`.
-    /// Zero focus time always maps to `0.0`; non-zero focus time scales linearly
-    /// in direct proportion to `focus_secs`.
     pub fn intensity_for(focus_secs: u64, max_daily_secs: u64) -> f64 {
         if focus_secs == 0 {
             return 0.0;
@@ -619,6 +826,23 @@ impl SessionStats {
         live_focus_secs: u64,
         active_mode_name: &str,
     ) -> AnalyticsSummary {
+        self.analytics_summary_with_category(
+            today,
+            current_hour,
+            live_focus_secs,
+            active_mode_name,
+            "Coding",
+        )
+    }
+
+    pub fn analytics_summary_with_category(
+        &self,
+        today: NaiveDate,
+        current_hour: usize,
+        live_focus_secs: u64,
+        active_mode_name: &str,
+        active_category_name: &str,
+    ) -> AnalyticsSummary {
         let mut effective = self.history.clone();
         let today_key = Self::format_date(today);
         let recorded_today_secs = self
@@ -634,7 +858,16 @@ impl SessionStats {
             let entry = effective.entry(today_key.clone()).or_default();
             entry.focus_secs = today_combined_secs;
             entry.sessions = today_combined_sessions;
+            if live_focus_secs > 0 {
+                entry.add_category_secs(active_category_name, live_focus_secs);
+            }
         }
+
+        let today_cat_secs = effective
+            .get(&today_key)
+            .copied()
+            .unwrap_or_default()
+            .category_split();
 
         let window_start = today - ChronoDuration::days(YEAR_DAYS as i64 - 1);
 
@@ -652,6 +885,9 @@ impl SessionStats {
         let mut active_days_year = 0u32;
         let mut peak_day_secs = 0u64;
         let mut peak_day_date: Option<NaiveDate> = None;
+        let mut year_cat_from_days = [0u64; 3];
+        let mut cat_active_days = [0u32; 3];
+        let mut cat_weekday_secs = [[0u64; 7]; 3];
 
         let mut weekday_stats = [WeekdayStat::default(); 7];
         for (i, ws) in weekday_stats.iter_mut().enumerate() {
@@ -665,6 +901,8 @@ impl SessionStats {
                 date: week_monday,
                 focus_secs: 0,
                 sessions: 0,
+                cat_secs: [0; 3],
+                dominant_category: FocusCategory::Coding,
                 in_year_window: false,
             }; GRID_DAYS_PER_WEEK];
 
@@ -677,6 +915,7 @@ impl SessionStats {
                 } else {
                     DailyStat::default()
                 };
+                let split = stat.category_split();
 
                 if in_year_window {
                     year_focus_secs = year_focus_secs.saturating_add(stat.focus_secs);
@@ -693,6 +932,17 @@ impl SessionStats {
                         weekday_stats[row].sessions =
                             weekday_stats[row].sessions.saturating_add(stat.sessions);
                         weekday_stats[row].active_days += 1;
+                        for c_i in 0..3 {
+                            weekday_stats[row].cat_secs[c_i] =
+                                weekday_stats[row].cat_secs[c_i].saturating_add(split[c_i]);
+                            year_cat_from_days[c_i] =
+                                year_cat_from_days[c_i].saturating_add(split[c_i]);
+                            cat_weekday_secs[c_i][row] =
+                                cat_weekday_secs[c_i][row].saturating_add(split[c_i]);
+                            if split[c_i] > 0 {
+                                cat_active_days[c_i] += 1;
+                            }
+                        }
                     }
                 }
 
@@ -700,6 +950,8 @@ impl SessionStats {
                     date: cell_date,
                     focus_secs: stat.focus_secs,
                     sessions: stat.sessions,
+                    cat_secs: split,
+                    dominant_category: stat.dominant_category(),
                     in_year_window,
                 };
             }
@@ -786,6 +1038,31 @@ impl SessionStats {
             }
         }
 
+        // Per-category current streaks
+        let mut cat_streaks = [0u32; 3];
+        for c_i in 0..3 {
+            let is_cat_active = |d: NaiveDate| -> bool {
+                let k = Self::format_date(d);
+                effective
+                    .get(&k)
+                    .is_some_and(|s| s.category_split()[c_i] > 0)
+            };
+            let mut cur = if is_cat_active(today) {
+                Some(today)
+            } else {
+                let yest = today - ChronoDuration::days(1);
+                is_cat_active(yest).then_some(yest)
+            };
+            while let Some(d) = cur {
+                if is_cat_active(d) {
+                    cat_streaks[c_i] += 1;
+                    cur = Some(d - ChronoDuration::days(1));
+                } else {
+                    break;
+                }
+            }
+        }
+
         // Averages
         let avg_active_day_secs = if active_days_year > 0 {
             year_focus_secs / active_days_year as u64
@@ -804,25 +1081,45 @@ impl SessionStats {
             .clamp(1, YEAR_DAYS as u64);
         let avg_daily_secs = year_focus_secs / span_days;
 
-        // Last 7 days breakdown
+        // Last 7 days breakdown + 7-day per-category totals
         let mut last_7_days = Vec::with_capacity(7);
+        let mut week_cat_secs = [0u64; 3];
         for i in (0..7).rev() {
             let d = today - ChronoDuration::days(i);
             let k = Self::format_date(d);
             let st = effective.get(&k).copied().unwrap_or_default();
-            last_7_days.push((d, st.focus_secs, st.sessions));
+            let split = st.category_split();
+            for c_i in 0..3 {
+                week_cat_secs[c_i] = week_cat_secs[c_i].saturating_add(split[c_i]);
+            }
+            last_7_days.push((d, st.focus_secs, st.sessions, split));
         }
 
-        // 24-Hour Diurnal Focus distribution + chronotype split
+        // 24-Hour Diurnal Focus distribution + per-category hourly distribution
         let mut hourly_focus_secs = self.hourly_focus_secs;
+        let mut hourly_cat_secs = self.hourly_cat_secs;
+        let h_now = current_hour % 24;
         if live_focus_secs > 0 {
-            hourly_focus_secs[current_hour % 24] =
-                hourly_focus_secs[current_hour % 24].saturating_add(live_focus_secs);
+            hourly_focus_secs[h_now] = hourly_focus_secs[h_now].saturating_add(live_focus_secs);
+            let c_idx = category_index(active_category_name);
+            hourly_cat_secs[h_now][c_idx] =
+                hourly_cat_secs[h_now][c_idx].saturating_add(live_focus_secs);
         }
         let hourly_sum: u64 = hourly_focus_secs.iter().sum();
         if hourly_sum == 0 && year_focus_secs > 0 {
-            hourly_focus_secs[current_hour % 24] = year_focus_secs;
+            hourly_focus_secs[h_now] = year_focus_secs;
         }
+        // Reconcile any legacy uncategorized hourly seconds into Coding (index 0)
+        for h in 0..24 {
+            let cat_h_sum = hourly_cat_secs[h][0]
+                .saturating_add(hourly_cat_secs[h][1])
+                .saturating_add(hourly_cat_secs[h][2]);
+            if hourly_focus_secs[h] > cat_h_sum {
+                hourly_cat_secs[h][0] =
+                    hourly_cat_secs[h][0].saturating_add(hourly_focus_secs[h] - cat_h_sum);
+            }
+        }
+
         let total_hourly: u64 = hourly_focus_secs.iter().sum();
         let peak_hour = hourly_focus_secs
             .iter()
@@ -830,6 +1127,28 @@ impl SessionStats {
             .filter(|(_, &s)| s > 0)
             .max_by_key(|(_, &s)| s)
             .map(|(h, _)| h);
+
+        let mut chronotype_cat_secs = [[0u64; 3]; 4];
+        for h in 6..12 {
+            for c_i in 0..3 {
+                chronotype_cat_secs[0][c_i] += hourly_cat_secs[h][c_i];
+            }
+        }
+        for h in 12..18 {
+            for c_i in 0..3 {
+                chronotype_cat_secs[1][c_i] += hourly_cat_secs[h][c_i];
+            }
+        }
+        for h in 18..24 {
+            for c_i in 0..3 {
+                chronotype_cat_secs[2][c_i] += hourly_cat_secs[h][c_i];
+            }
+        }
+        for h in 0..6 {
+            for c_i in 0..3 {
+                chronotype_cat_secs[3][c_i] += hourly_cat_secs[h][c_i];
+            }
+        }
 
         let chronotype_pcts = if total_hourly > 0 {
             let morning: u64 = hourly_focus_secs[6..12].iter().sum();
@@ -863,16 +1182,22 @@ impl SessionStats {
             0.0
         };
 
-        // Mode Distribution (Classic, Session, Extended)
+        // Mode Distribution (Classic, Session, Extended) with legacy reconciliation
         let mut mode_map = self.mode_focus_secs.clone();
         let mut mode_sess_map = self.mode_sessions.clone();
         if live_focus_secs > 0 {
             *mode_map.entry(active_mode_name.to_string()).or_insert(0) += live_focus_secs;
         }
         let recorded_mode_sum: u64 = mode_map.values().sum();
-        if recorded_mode_sum == 0 && year_focus_secs > 0 {
-            mode_map.insert(active_mode_name.to_string(), year_focus_secs);
-            mode_sess_map.insert(active_mode_name.to_string(), year_sessions);
+        if year_focus_secs > recorded_mode_sum {
+            *mode_map.entry(active_mode_name.to_string()).or_insert(0) +=
+                year_focus_secs - recorded_mode_sum;
+        }
+        let recorded_mode_sess: u32 = mode_sess_map.values().sum();
+        if year_sessions > recorded_mode_sess {
+            *mode_sess_map
+                .entry(active_mode_name.to_string())
+                .or_insert(0) += year_sessions - recorded_mode_sess;
         }
         let mode_total_secs: u64 = mode_map.values().sum();
         let mut mode_stats = Vec::with_capacity(3);
@@ -892,6 +1217,85 @@ impl SessionStats {
             });
         }
 
+        // Rich Category Distribution (Coding, Learning, Reading) with legacy reconciliation!
+        // Any focus time or sessions recorded prior to category tracking are automatically
+        // attributed to Coding so that category totals always match `year_focus_secs`.
+        let mut cat_map = self.category_focus_secs.clone();
+        let mut cat_sess_map = self.category_sessions.clone();
+        if live_focus_secs > 0 {
+            *cat_map
+                .entry(active_category_name.to_string())
+                .or_insert(0) += live_focus_secs;
+        }
+        for (idx, cat_enum) in FocusCategory::ALL.into_iter().enumerate() {
+            let entry = cat_map.entry(cat_enum.label().to_string()).or_insert(0);
+            if year_cat_from_days[idx] > *entry {
+                *entry = year_cat_from_days[idx];
+            }
+        }
+        let recorded_cat_sum: u64 = cat_map.values().sum();
+        if year_focus_secs > recorded_cat_sum {
+            *cat_map.entry("Coding".to_string()).or_insert(0) +=
+                year_focus_secs - recorded_cat_sum;
+        }
+        let recorded_cat_sess: u32 = cat_sess_map.values().sum();
+        if year_sessions > recorded_cat_sess {
+            *cat_sess_map.entry("Coding".to_string()).or_insert(0) +=
+                year_sessions - recorded_cat_sess;
+        }
+
+        let cat_total_secs: u64 = cat_map.values().sum();
+        let mut category_stats = Vec::with_capacity(3);
+        for (c_i, cat_enum) in FocusCategory::ALL.into_iter().enumerate() {
+            let name = cat_enum.label();
+            let f_secs = cat_map.get(name).copied().unwrap_or(0);
+            let sess = cat_sess_map.get(name).copied().unwrap_or(0);
+            let intr = self.category_interrupted.get(name).copied().unwrap_or(0);
+            let attempts = sess.saturating_add(intr);
+            let comp_pct = if attempts > 0 {
+                (sess as f64 / attempts as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_sess = if sess > 0 { f_secs / sess as u64 } else { 0 };
+            let pct = if cat_total_secs > 0 {
+                (f_secs as f64 / cat_total_secs as f64) * 100.0
+            } else {
+                0.0
+            };
+            let best_dow = cat_weekday_secs[c_i]
+                .iter()
+                .enumerate()
+                .filter(|(_, &s)| s > 0)
+                .max_by_key(|(_, &s)| s)
+                .map(|(d, _)| d);
+            let pk_hour = (0..24)
+                .filter(|&h| hourly_cat_secs[h][c_i] > 0)
+                .max_by_key(|&h| hourly_cat_secs[h][c_i]);
+
+            category_stats.push(CategoryStat {
+                category: cat_enum,
+                name: name.to_string(),
+                focus_secs: f_secs,
+                today_secs: today_cat_secs[c_i],
+                week_secs: week_cat_secs[c_i],
+                sessions: sess,
+                interrupted: intr,
+                completion_pct: comp_pct,
+                avg_session_secs: avg_sess,
+                active_days: cat_active_days[c_i],
+                current_streak: cat_streaks[c_i],
+                best_weekday: best_dow,
+                peak_hour: pk_hour,
+                share_pct: pct,
+            });
+        }
+        let top_category = category_stats
+            .iter()
+            .filter(|c| c.focus_secs > 0)
+            .max_by_key(|c| c.focus_secs)
+            .map(|c| c.name.clone());
+
         // Discipline & Completion Index
         let completed_focus_count = self.completed_focus_count.max(year_sessions);
         let interrupted_focus_count = self.interrupted_focus_count;
@@ -909,16 +1313,22 @@ impl SessionStats {
             let prefix = format!("{:04}-{:02}-", y, m);
             let mut m_secs = 0u64;
             let mut m_sess = 0u32;
+            let mut m_cats = [0u64; 3];
             for (k, st) in &effective {
                 if k.starts_with(&prefix) {
                     m_secs = m_secs.saturating_add(st.focus_secs);
                     m_sess = m_sess.saturating_add(st.sessions);
+                    let sp = st.category_split();
+                    for c_i in 0..3 {
+                        m_cats[c_i] = m_cats[c_i].saturating_add(sp[c_i]);
+                    }
                 }
             }
             monthly_velocity.push((
                 format!("{} '{:02}", month_short_name(m), y.rem_euclid(100)),
                 m_secs,
                 m_sess,
+                m_cats,
             ));
         }
 
@@ -928,6 +1338,7 @@ impl SessionStats {
             today_date: today,
             today_focus_secs: today_combined_secs,
             today_sessions: today_combined_sessions,
+            today_cat_secs,
             year_focus_secs,
             year_break_secs,
             year_sessions,
@@ -947,8 +1358,10 @@ impl SessionStats {
             month_labels,
             last_7_days,
             hourly_focus_secs,
+            hourly_cat_secs,
             peak_hour,
             chronotype_pcts,
+            chronotype_cat_secs,
             weekday_stats,
             peak_weekday,
             focus_share_pct,
@@ -956,6 +1369,8 @@ impl SessionStats {
             work_rest_ratio,
             cycles_completed: self.cycles_completed,
             mode_stats,
+            category_stats,
+            top_category,
             completed_focus_count,
             interrupted_focus_count,
             completion_rate_pct,
@@ -1019,6 +1434,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_uncategorized_history_is_reconciled_into_coding() {
+        let mut stats = SessionStats::in_memory();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+        // Legacy day with 9 sessions (3h 45m = 13500s) and zero category breakdown,
+        // plus 1 new session (25m = 1500s) recorded in category_focus_secs:
+        stats.history.insert(
+            SessionStats::format_date(today),
+            DailyStat {
+                focus_secs: 15000,
+                sessions: 10,
+                break_secs: 1800,
+                coding_secs: 1500,
+                learning_secs: 0,
+                reading_secs: 0,
+            },
+        );
+        stats.category_focus_secs.insert("Coding".into(), 1500);
+        stats.category_sessions.insert("Coding".into(), 1);
+
+        let summary = stats.analytics_summary_at(today, 0);
+        assert_eq!(summary.category_stats[0].focus_secs, 15000);
+        assert_eq!(summary.category_stats[0].sessions, 10);
+        assert!((summary.category_stats[0].share_pct - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn streaks_averages_and_telemetry_are_computed_accurately() {
         let mut stats = SessionStats::in_memory();
         let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
@@ -1032,6 +1473,9 @@ mod tests {
                     focus_secs: 3600,
                     sessions: 2,
                     break_secs: 600,
+                    coding_secs: 1800,
+                    learning_secs: 1200,
+                    reading_secs: 600,
                 },
             );
         }
@@ -1041,6 +1485,9 @@ mod tests {
         stats.hourly_focus_secs[14] = 3600;
         stats.mode_focus_secs.insert("Classic".into(), 3600);
         stats.mode_focus_secs.insert("Session".into(), 7200);
+        stats.category_focus_secs.insert("Coding".into(), 7 * 1800);
+        stats.category_focus_secs.insert("Learning".into(), 7 * 1200);
+        stats.category_focus_secs.insert("Reading".into(), 7 * 600);
         stats.completed_focus_count = 14;
         stats.interrupted_focus_count = 1;
 
@@ -1055,6 +1502,10 @@ mod tests {
         assert!(summary.work_rest_ratio > 5.9 && summary.work_rest_ratio < 6.1);
         assert!(summary.completion_rate_pct > 93.0);
         assert_eq!(summary.mode_stats.len(), 3);
+        assert_eq!(summary.category_stats.len(), 3);
+        assert_eq!(summary.top_category.as_deref(), Some("Coding"));
+        assert!((summary.category_stats[0].share_pct - 50.0).abs() < 1e-6);
+        assert_eq!(summary.category_stats[0].active_days, 7);
         assert_eq!(summary.monthly_velocity.len(), 6);
         assert_eq!(summary.weeks.len(), GRID_WEEKS);
 

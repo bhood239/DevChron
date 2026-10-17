@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +13,88 @@ pub enum TimerPhase {
     Focus,
     ShortBreak,
     LongBreak,
+}
+
+impl TimerPhase {
+    pub const ALL: [TimerPhase; 3] = [
+        TimerPhase::Focus,
+        TimerPhase::ShortBreak,
+        TimerPhase::LongBreak,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimerPhase::Focus => "Focus",
+            TimerPhase::ShortBreak => "Short break",
+            TimerPhase::LongBreak => "Long break",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            TimerPhase::Focus => "Focus",
+            TimerPhase::ShortBreak => "Short",
+            TimerPhase::LongBreak => "Long",
+        }
+    }
+
+    pub fn key_hint(self) -> &'static str {
+        match self {
+            TimerPhase::Focus => "f",
+            TimerPhase::ShortBreak => "b",
+            TimerPhase::LongBreak => "l",
+        }
+    }
+}
+
+/// Category of focus work selected on the Timer page and tracked in Analytics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub enum FocusCategory {
+    #[default]
+    Coding,
+    Learning,
+    Reading,
+}
+
+impl FocusCategory {
+    pub const ALL: [FocusCategory; 3] = [
+        FocusCategory::Coding,
+        FocusCategory::Learning,
+        FocusCategory::Reading,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FocusCategory::Coding => "Coding",
+            FocusCategory::Learning => "Learning",
+            FocusCategory::Reading => "Reading",
+        }
+    }
+
+    pub fn upper_label(self) -> &'static str {
+        match self {
+            FocusCategory::Coding => "CODING",
+            FocusCategory::Learning => "LEARNING",
+            FocusCategory::Reading => "READING",
+        }
+    }
+
+    pub fn cycle_next(self) -> Self {
+        match self {
+            FocusCategory::Coding => FocusCategory::Learning,
+            FocusCategory::Learning => FocusCategory::Reading,
+            FocusCategory::Reading => FocusCategory::Coding,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_name(name: &str) -> Self {
+        match name.trim().to_lowercase().as_str() {
+            "learning" | "learn" => FocusCategory::Learning,
+            "reading" | "read" => FocusCategory::Reading,
+            _ => FocusCategory::Coding,
+        }
+    }
 }
 
 /// A single countdown (one focus session or one break).
@@ -130,6 +213,21 @@ mod tests {
     use super::*;
 
     const MIN: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn focus_categories_cycle_through_coding_learning_reading() {
+        let mut cat = FocusCategory::default();
+        assert_eq!(cat, FocusCategory::Coding);
+        assert_eq!(cat.label(), "Coding");
+        cat = cat.cycle_next();
+        assert_eq!(cat, FocusCategory::Learning);
+        assert_eq!(cat.label(), "Learning");
+        cat = cat.cycle_next();
+        assert_eq!(cat, FocusCategory::Reading);
+        assert_eq!(cat.label(), "Reading");
+        cat = cat.cycle_next();
+        assert_eq!(cat, FocusCategory::Coding);
+    }
 
     #[test]
     fn counts_down_against_the_clock() {

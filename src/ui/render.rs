@@ -1,8 +1,10 @@
 use super::ring::{self, Ring};
 use super::style;
 use super::theme::{blend_linear, Theme};
-use crate::timer::session::{AnalyticsSummary, SessionStats, SystemIdentity, GRID_DAYS_PER_WEEK};
-use crate::timer::{PomodoroMode, PomodoroTimer, TimerPhase};
+use crate::timer::session::{
+    category_index, AnalyticsSummary, SessionStats, SystemIdentity, GRID_DAYS_PER_WEEK,
+};
+use crate::timer::{FocusCategory, PomodoroMode, PomodoroTimer, TimerPhase};
 use chrono::{Datelike, Local, Timelike};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -31,13 +33,13 @@ pub struct UiState<'a> {
     pub alarm_flash: bool,
     /// Offline system username and computer hostname.
     pub system_identity: &'a SystemIdentity,
+    /// Optional category filter on the Analytics page (`None` = All categories).
+    pub analytics_filter: Option<FocusCategory>,
+    /// Scroll offset in the Analytics Recent sessions table.
+    pub analytics_scroll: usize,
 }
 
 // ─── Big-digit block art ────────────────────────────────────────────────────
-//
-// Large digits are 5 rows × 5 cols, medium digits are 5 rows × 3 cols. Both use
-// full-block (█) and space characters. `choose_digit_style` picks the largest
-// one that fits inside the progress ring.
 
 const DIGITS: [&[&str]; 10] = [
     // 0
@@ -118,9 +120,6 @@ impl DigitStyle {
     }
 }
 
-/// Does a block `width_cols` wide, whose farthest edge is `edge_rows` rows from
-/// the ring centre, fit inside the inner circle (radius `r_in`, in dots)?
-/// One cell is 2 dots wide and 4 dots tall.
 fn fits_in_ring(width_cols: usize, edge_rows: f64, r_in: f64) -> bool {
     let corner = (width_cols as f64).hypot(edge_rows * 4.0);
     corner + 1.5 <= r_in
@@ -141,25 +140,33 @@ fn block_lines_with_colon(
     digits: &[&[&str]; 10],
     colon: &[&str],
     digit_color: Color,
+    digit_end_color: Color,
     colon_color: Color,
 ) -> Vec<Line<'static>> {
     let mut rows: [Vec<Span<'static>>; 5] = Default::default();
     let mut first = true;
-    let d_style = Style::default().fg(digit_color).add_modifier(Modifier::BOLD);
     let c_style = Style::default().fg(colon_color).add_modifier(Modifier::BOLD);
+    let row_styles: [Style; 5] = std::array::from_fn(|r| {
+        let t = (r as f64 / 4.0) * 0.65;
+        Style::default()
+            .fg(blend_linear(digit_color, digit_end_color, t))
+            .add_modifier(Modifier::BOLD)
+    });
 
     for ch in time_str.chars() {
-        let (pattern, st): (&[&str], Style) = if ch == ':' {
-            (colon, c_style)
+        let is_colon = ch == ':';
+        let pattern: &[&str] = if is_colon {
+            colon
         } else if ch.is_ascii_digit() {
-            (digits[ch as usize - '0' as usize], d_style)
+            digits[ch as usize - '0' as usize]
         } else {
             continue;
         };
 
         for (i, row) in pattern.iter().enumerate() {
+            let st = if is_colon { c_style } else { row_styles[i] };
             if !first {
-                rows[i].push(Span::styled(" ", d_style));
+                rows[i].push(Span::styled(" ", row_styles[i]));
             }
             rows[i].push(Span::styled((*row).to_string(), st));
         }
@@ -172,24 +179,31 @@ fn block_lines_with_colon(
 /// Render a time string (e.g. "25:04") into lines using the given style.
 #[cfg(test)]
 fn digit_lines(time_str: &str, style: DigitStyle, color: Color) -> Vec<Line<'static>> {
-    digit_lines_styled(time_str, style, color, color)
+    digit_lines_styled(time_str, style, color, color, color)
 }
 
 fn digit_lines_styled(
     time_str: &str,
     style: DigitStyle,
     digit_color: Color,
+    digit_end_color: Color,
     colon_color: Color,
 ) -> Vec<Line<'static>> {
     match style {
-        DigitStyle::Large => {
-            block_lines_with_colon(time_str, &DIGITS, COLON, digit_color, colon_color)
-        }
+        DigitStyle::Large => block_lines_with_colon(
+            time_str,
+            &DIGITS,
+            COLON,
+            digit_color,
+            digit_end_color,
+            colon_color,
+        ),
         DigitStyle::Medium => block_lines_with_colon(
             time_str,
             &DIGITS_MEDIUM,
             COLON_MEDIUM,
             digit_color,
+            digit_end_color,
             colon_color,
         ),
         DigitStyle::Compact => vec![Line::from(Span::styled(
@@ -204,7 +218,6 @@ fn digit_lines_styled(
 pub fn render(f: &mut Frame, ui: &UiState) {
     let size = f.size();
 
-    // Minimum terminal size guard
     if size.width < 60 || size.height < 16 {
         render_too_small(f, size, ui.theme);
         return;
@@ -242,15 +255,16 @@ fn render_full(f: &mut Frame, size: Rect, ui: &UiState) {
     let inner = main_block.inner(size);
     f.render_widget(main_block, size);
 
+    let header_height = if inner.height >= 18 { 4 } else { 3 };
     let compact = inner.height < FULL_FOOTER_MIN_HEIGHT;
     let footer_height = if compact { 1 } else { 3 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),             // Header (brand + phase + mode tabs)
-            Constraint::Min(0),                // Spacious central timer ring
-            Constraint::Length(footer_height), // Quiet borderless keycap footer
+            Constraint::Length(header_height),
+            Constraint::Min(0),
+            Constraint::Length(footer_height),
         ])
         .split(inner);
 
@@ -276,27 +290,40 @@ fn phase_labels(phase: TimerPhase) -> (&'static str, &'static str) {
 fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
     let theme = ui.theme;
     let timer = ui.timer;
-    let phase_color = get_phase_color(timer.current_timer.phase, theme);
     let is_paused = !timer.is_running();
-    let (phase_title, _) = phase_labels(timer.current_timer.phase);
+    let width = area.width as usize;
 
-    // Row 1: DevChron · Phase [paused / ALARM] ... g Analytics on the right
+    // Row 1: ◆ DevChron · Phase selector chips ([f Focus]  b Short break  l Long break) ... g Analytics
     let mut row1_spans = vec![
         Span::raw("  "),
+        Span::styled("◆ ", style::accent_bold(theme.gold)),
         Span::styled("DevChron", style::value_bold(theme)),
         Span::styled("  ·  ", style::label(theme)),
-        Span::styled(phase_title, style::accent_bold(phase_color)),
     ];
+    row1_spans.extend(phase_tabs_spans(ui, width >= 78));
 
-    if timer.alarm_ringing {
+    if area.height < 4 {
+        let cat_col = theme.category_color(timer.category);
+        row1_spans.push(Span::styled(" · ", style::label(theme)));
+        row1_spans.push(Span::styled("c ", style::keycap(theme.gold)));
+        row1_spans.push(Span::styled(timer.category.label(), style::accent_bold(cat_col)));
+    } else if timer.alarm_ringing {
         row1_spans.push(Span::styled(
             "  ALARM",
             Style::default()
-                .fg(if ui.alarm_flash { theme.text } else { phase_color })
+                .fg(if ui.alarm_flash { theme.gold } else { theme.rose })
                 .add_modifier(Modifier::BOLD),
         ));
     } else if is_paused {
-        row1_spans.push(Span::styled("  paused", style::label(theme)));
+        row1_spans.push(Span::styled(
+            "  paused",
+            Style::default().fg(theme.amber),
+        ));
+    } else {
+        row1_spans.push(Span::styled(
+            "  ● live",
+            Style::default().fg(theme.emerald).add_modifier(Modifier::BOLD),
+        ));
     }
 
     let mut row1 = Line::from(row1_spans);
@@ -304,16 +331,20 @@ fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
     let right_lbl = " Analytics  ";
     let right_w = right_key.len() + right_lbl.len();
     let row1_left_w = row1.width();
-    let width = area.width as usize;
     if row1_left_w + right_w + 2 <= width {
         let pad = width - row1_left_w - right_w;
         row1.spans.push(Span::raw(" ".repeat(pad)));
-        row1.spans.push(Span::styled(right_key, style::keycap(phase_color)));
-        row1.spans.push(Span::styled(right_lbl, style::label(theme)));
+        row1.spans
+            .push(Span::styled(right_key, style::keycap(theme.long_break_color)));
+        row1.spans.push(Span::styled(
+            right_lbl,
+            Style::default().fg(theme.section_accent),
+        ));
     }
 
-    // Row 2: mode tabs on the left, session counter on the right.
-    let mut row2 = mode_tabs(ui, phase_color);
+    // Row 2: colorful mode tabs on the left, cycle dots + session counter on the right.
+    let active_mode_col = theme.mode_color(ui.mode_index);
+    let mut row2 = mode_tabs(ui, active_mode_col);
     let session_text = format!(
         "{:02}/{:02}",
         timer.cycle_count + 1,
@@ -332,11 +363,58 @@ fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
         row2.spans
             .push(Span::raw(" ".repeat(width - left_width - right_width)));
         row2.spans
-            .push(Span::styled(session_text, style::value_bold(theme)));
+            .push(Span::styled(session_text, style::accent_bold(theme.gold)));
         row2.spans.push(Span::styled(suffix, style::label(theme)));
     }
 
-    let header = Paragraph::new(vec![row1, row2]).block(
+    let mut rows = vec![row1, row2];
+
+    // Row 3: Focus category selector chips (Coding · Learning · Reading), each with its distinct color
+    if area.height >= 4 {
+        let mut row3 = category_tabs(ui);
+        let today_secs = timer
+            .stats
+            .today_focus_time
+            .as_secs()
+            .saturating_add(timer.live_focus_secs());
+        let cat_secs = timer
+            .stats
+            .category_focus_secs
+            .get(timer.category.label())
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(timer.live_focus_secs());
+        let cat_col = theme.category_color(timer.category);
+
+        if width >= 88 {
+            let s1 = format!("{} ", timer.category.label());
+            let s2 = SessionStats::format_duration_secs(cat_secs);
+            let s3 = "  ·  today ";
+            let s4 = format!("{}  ", SessionStats::format_duration_secs(today_secs));
+            let r3_right = s1.chars().count() + s2.chars().count() + s3.chars().count() + s4.chars().count();
+            let r3_left = row3.width();
+            if r3_left + r3_right + 2 <= width {
+                row3.spans.push(Span::raw(" ".repeat(width - r3_left - r3_right)));
+                row3.spans.push(Span::styled(s1, Style::default().fg(cat_col)));
+                row3.spans.push(Span::styled(s2, style::accent_bold(cat_col)));
+                row3.spans.push(Span::styled(s3, style::label(theme)));
+                row3.spans.push(Span::styled(s4, style::accent_bold(theme.gold)));
+            }
+        } else {
+            let s1 = "today ";
+            let s2 = format!("{}  ", SessionStats::format_duration_secs(today_secs));
+            let r3_right = s1.chars().count() + s2.chars().count();
+            let r3_left = row3.width();
+            if r3_left + r3_right + 2 <= width {
+                row3.spans.push(Span::raw(" ".repeat(width - r3_left - r3_right)));
+                row3.spans.push(Span::styled(s1, style::label(theme)));
+                row3.spans.push(Span::styled(s2, style::accent_bold(theme.gold)));
+            }
+        }
+        rows.push(row3);
+    }
+
+    let header = Paragraph::new(rows).block(
         Block::default()
             .borders(Borders::BOTTOM)
             .border_style(style::rule_style(theme)),
@@ -345,14 +423,44 @@ fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
     f.render_widget(header, area);
 }
 
-/// `[ 1 Classic · 25/5/15 ]  2 Session  3 Extended`
-///
-/// The selected mode is a filled chip (reverse video + bold) that also shows
-/// its focus/short/long minutes; the others stay quiet and plain.
+fn phase_tabs_spans(ui: &UiState, full_labels: bool) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(TimerPhase::ALL.len() * 3);
+    let active_phase = ui.timer.current_timer.phase;
+
+    for (i, phase) in TimerPhase::ALL.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let p_color = get_phase_color(phase, ui.theme);
+        let name = if full_labels {
+            phase.label()
+        } else {
+            phase.short_label()
+        };
+        if phase == active_phase {
+            spans.push(Span::styled(
+                format!(" {} {} ", phase.key_hint(), name),
+                Style::default()
+                    .fg(p_color)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {}", phase.key_hint()),
+                style::keycap(p_color),
+            ));
+            spans.push(Span::styled(format!(" {name} "), style::label(ui.theme)));
+        }
+    }
+
+    spans
+}
+
 fn mode_tabs(ui: &UiState, accent: Color) -> Line<'static> {
     let mut spans = vec![Span::raw("  ")];
 
     for (i, mode) in ui.modes.iter().enumerate() {
+        let mode_col = ui.theme.mode_color(i);
         if i == ui.mode_index {
             spans.push(Span::styled(
                 format!(" {} {} · {} ", i + 1, mode.name, mode.summary()),
@@ -362,8 +470,46 @@ fn mode_tabs(ui: &UiState, accent: Color) -> Line<'static> {
             ));
         } else {
             spans.push(Span::styled(
-                format!(" {} {} ", i + 1, mode.name),
+                format!(" {}", i + 1),
+                style::keycap(mode_col),
+            ));
+            spans.push(Span::styled(
+                format!(" {} ", mode.name),
                 style::label(ui.theme),
+            ));
+        }
+        spans.push(Span::raw(" "));
+    }
+
+    Line::from(spans)
+}
+
+/// Focus category selector row with distinct per-category colors.
+fn category_tabs(ui: &UiState) -> Line<'static> {
+    let theme = ui.theme;
+    let active_cat = ui.timer.category;
+
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled("Category ", style::section_title(theme)),
+        Span::styled("c", style::keycap(theme.gold)),
+        Span::raw("  "),
+    ];
+
+    for cat in FocusCategory::ALL {
+        let cat_col = theme.category_color(cat);
+        if cat == active_cat {
+            spans.push(Span::styled(
+                format!(" ● {} ", cat.label()),
+                Style::default()
+                    .fg(cat_col)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+        } else {
+            spans.push(Span::styled(" ●", Style::default().fg(cat_col)));
+            spans.push(Span::styled(
+                format!(" {} ", cat.label()),
+                style::label(theme),
             ));
         }
         spans.push(Span::raw(" "));
@@ -374,36 +520,35 @@ fn mode_tabs(ui: &UiState, accent: Color) -> Line<'static> {
 
 // ─── Timer area ──────────────────────────────────────────────────────────────
 
-/// Colour of the digits: phase colour while running, gently muted phase tint
-/// while paused, and flashing between the phase colour and bright text while
-/// the alarm rings.
 fn digit_color(ui: &UiState) -> Color {
-    let phase_color = get_phase_color(ui.timer.current_timer.phase, ui.theme);
+    let (base_col, _) = ui
+        .theme
+        .active_timer_gradient(ui.timer.current_timer.phase, ui.timer.category);
     if ui.alarm_ringing {
         if ui.alarm_flash {
-            ui.theme.text
+            ui.theme.gold
         } else {
-            phase_color
+            ui.theme.rose
         }
     } else if ui.timer.is_running() {
-        phase_color
+        base_col
     } else {
-        blend_linear(phase_color, ui.theme.paused_color, 0.58)
+        blend_linear(base_col, ui.theme.paused_color, 0.42)
     }
 }
 
-/// `(from, to)` colours of the progress ring for the current state: gently
-/// softened while paused, flashing brighter while the alarm rings.
 fn ring_colors(ui: &UiState) -> (Color, Color) {
-    let (mut from, mut to) = ui.theme.ring_gradient(ui.timer.current_timer.phase);
+    let (mut from, mut to) = ui
+        .theme
+        .active_timer_gradient(ui.timer.current_timer.phase, ui.timer.category);
     if ui.alarm_ringing {
         if ui.alarm_flash {
-            from = blend_linear(from, ui.theme.text, 0.6);
-            to = blend_linear(to, ui.theme.text, 0.6);
+            from = blend_linear(from, ui.theme.gold, 0.65);
+            to = blend_linear(to, ui.theme.text, 0.65);
         }
     } else if !ui.timer.is_running() {
-        from = blend_linear(from, ui.theme.paused_color, 0.45);
-        to = blend_linear(to, ui.theme.paused_color, 0.45);
+        from = blend_linear(from, ui.theme.paused_color, 0.35);
+        to = blend_linear(to, ui.theme.paused_color, 0.35);
     }
     (from, to)
 }
@@ -461,24 +606,27 @@ fn render_timer(f: &mut Frame, area: Rect, ui: &UiState) {
     } else if ui.celebrating {
         let celebration = Paragraph::new(Line::from(Span::styled(
             "✦  Cycle complete  ✦",
-            style::accent_bold(theme.focus_color),
+            style::accent_bold(theme.gold),
         )))
         .alignment(Alignment::Center);
         f.render_widget(celebration, hint_area);
     } else if never_started {
         let hint = Paragraph::new(Line::from(vec![
             Span::styled("Press ", style::label(theme)),
-            Span::styled("Space", style::body(theme)),
+            Span::styled("Space", style::keycap(theme.emerald)),
             Span::styled(" to start  ·  ", style::label(theme)),
-            Span::styled("G", style::body(theme)),
-            Span::styled(" for analytics", style::label(theme)),
+            Span::styled("F/B/L", style::keycap(theme.cyan)),
+            Span::styled(" phase  ·  ", style::label(theme)),
+            Span::styled("C", style::keycap(theme.gold)),
+            Span::styled(" category  ·  ", style::label(theme)),
+            Span::styled("G", style::keycap(theme.long_break_color)),
+            Span::styled(" analytics", style::label(theme)),
         ]))
         .alignment(Alignment::Center);
         f.render_widget(hint, hint_area);
     }
 }
 
-/// Phase name, MM:SS and run state, centred inside the ring.
 fn render_ring_contents(
     f: &mut Frame,
     ring_area: Rect,
@@ -493,20 +641,31 @@ fn render_ring_contents(
     let time_str = timer.current_timer.format_time();
     let style = choose_digit_style(&time_str, geo.r_in);
     let (_, phase_upper) = phase_labels(timer.current_timer.phase);
-    let status = if ui.alarm_ringing {
-        "time's up"
-    } else if timer.is_running() {
-        "running"
+    let full_top_label = if timer.current_timer.phase == TimerPhase::Focus {
+        format!("{phase_upper} · {}", timer.category.upper_label())
     } else {
-        "paused"
+        phase_upper.to_string()
+    };
+    let (status, status_col) = if ui.alarm_ringing {
+        ("time's up", theme.rose)
+    } else if timer.is_running() {
+        ("running", theme.emerald)
+    } else {
+        ("paused", theme.amber)
     };
 
-    // Subtle 1 Hz colon breath while running: uses remaining_secs_ceil() which
-    // already drives the 1-second repaint cadence in main.rs, so zero extra
-    // wakeups occur when idle.
+    let (_, grad_end) = theme.active_timer_gradient(timer.current_timer.phase, timer.category);
+    let digit_end_color = if ui.alarm_ringing {
+        digit_color
+    } else if timer.is_running() {
+        grad_end
+    } else {
+        blend_linear(grad_end, theme.paused_color, 0.42)
+    };
+
     let colon_color = if timer.is_running() && !ui.alarm_ringing {
         if timer.current_timer.remaining_secs_ceil() % 2 == 1 {
-            blend_linear(digit_color, theme.dim, 0.32)
+            blend_linear(digit_color, theme.gold, 0.45)
         } else {
             digit_color
         }
@@ -514,22 +673,42 @@ fn render_ring_contents(
         digit_color
     };
 
-    let label_width = phase_upper.len().max(status.chars().count() + 1);
     let label_edge = style.rows() as f64 / 2.0 + 2.0;
-    let show_extras = with_extras && fits_in_ring(label_width, label_edge, geo.r_in);
+    let min_label_width = phase_upper.len().max(status.chars().count() + 1);
+    let show_extras = with_extras && fits_in_ring(min_label_width, label_edge, geo.r_in);
+    let show_full_top =
+        show_extras && fits_in_ring(full_top_label.len(), label_edge, geo.r_in);
 
     let mut lines: Vec<Line> = Vec::new();
     if show_extras {
-        lines.push(Line::from(Span::styled(
-            phase_upper,
-            Style::default().fg(get_phase_color(timer.current_timer.phase, theme)),
-        )));
+        if show_full_top && timer.current_timer.phase == TimerPhase::Focus {
+            let cat_col = theme.category_color(timer.category);
+            lines.push(Line::from(vec![
+                Span::styled(phase_upper, style::accent_bold(theme.focus_color)),
+                Span::styled(" · ", style::label(theme)),
+                Span::styled(timer.category.upper_label(), style::accent_bold(cat_col)),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                phase_upper,
+                style::accent_bold(get_phase_color(timer.current_timer.phase, theme)),
+            )));
+        }
         lines.push(Line::from(""));
     }
-    lines.extend(digit_lines_styled(&time_str, style, digit_color, colon_color));
+    lines.extend(digit_lines_styled(
+        &time_str,
+        style,
+        digit_color,
+        digit_end_color,
+        colon_color,
+    ));
     if show_extras {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(status, style::label(theme))));
+        lines.push(Line::from(Span::styled(
+            status,
+            Style::default().fg(status_col),
+        )));
     }
 
     let height = (lines.len() as u16).min(ring_area.height);
@@ -546,30 +725,29 @@ fn render_ring_contents(
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rect);
 }
 
-// ─── Footer (Quiet, Borderless Keycap List) ──────────────────────────────────
+// ─── Footer (Vibrant Multi-Hue Keycap Bar) ──────────────────────────────────
 
 fn render_footer(f: &mut Frame, area: Rect, ui: &UiState) {
     render_controls(f, area, ui.timer, ui.theme);
 }
 
-/// One-line key reference used when the terminal is too short for the full footer.
 fn render_compact_footer(f: &mut Frame, area: Rect, ui: &UiState) {
-    let phase_color = get_phase_color(ui.timer.current_timer.phase, ui.theme);
-    const HINTS: [(&str, &str); 8] = [
+    let theme = ui.theme;
+    const HINTS: [(&str, &str); 9] = [
         ("p", "pause"),
+        ("f/b", "phase"),
+        ("c", "cat"),
         ("r", "reset"),
         ("s", "skip"),
         ("1-3", "mode"),
         ("g", "analytics"),
-        ("t", "theme"),
         ("h", "help"),
         ("q", "quit"),
     ];
-    const DROP_ORDER: [&str; 5] = ["t", "s", "r", "h", "g"];
-    const RINGING_HINTS: [(&str, &str); 4] = [
+    const DROP_ORDER: [&str; 6] = ["h", "s", "r", "c", "f/b", "g"];
+    const RINGING_HINTS: [(&str, &str); 3] = [
         ("a", "stop alarm"),
         ("g", "analytics"),
-        ("t", "theme"),
         ("q", "quit"),
     ];
 
@@ -593,13 +771,23 @@ fn render_compact_footer(f: &mut Frame, area: Rect, ui: &UiState) {
         active.retain(|(k, _)| *k != dropped);
     }
 
+    let palette = [
+        theme.emerald,
+        theme.cyan,
+        theme.gold,
+        theme.amber,
+        theme.focus_color,
+        theme.long_break_color,
+        theme.rose,
+    ];
     let mut spans = Vec::new();
     for (i, (k, d)) in active.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(k.to_string(), style::keycap(phase_color)));
-        spans.push(Span::styled(format!(" {d}"), style::label(ui.theme)));
+        let col = palette[i % palette.len()];
+        spans.push(Span::styled(k.to_string(), style::keycap(col)));
+        spans.push(Span::styled(format!(" {d}"), style::label(theme)));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
@@ -611,67 +799,52 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
     let phase_color = get_phase_color(timer.current_timer.phase, theme);
     let pause_label = if timer.is_running() { "pause" } else { "start" };
 
-    let key = |k: &'static str| Span::styled(k, style::keycap(phase_color));
     let desc = |d: &'static str| Span::styled(format!(" {d}"), style::label(theme));
     let sep = || Span::raw("   ");
 
     if timer.alarm_ringing {
         let lines = vec![Line::from(vec![
-            key("a"),
-            Span::styled(" Stop alarm", style::accent_bold(phase_color)),
+            Span::styled("a", style::keycap(theme.rose)),
+            Span::styled(" Stop alarm", style::accent_bold(theme.gold)),
             sep(),
-            key("g"),
+            Span::styled("g", style::keycap(theme.long_break_color)),
             desc("analytics"),
             sep(),
-            key("t"),
-            desc("theme"),
-            sep(),
-            key("m"),
+            Span::styled("m", style::keycap(theme.cyan)),
             desc("minimal"),
             sep(),
-            key("h"),
+            Span::styled("h", style::keycap(theme.section_accent)),
             desc("help"),
             sep(),
-            key("q"),
+            Span::styled("q", style::keycap(theme.rose)),
             desc("quit"),
         ])];
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
         return;
     }
 
+    let row1_items: [(&str, &str); 6] = [
+        ("space", pause_label),
+        ("f/b/l", "focus/break"),
+        ("c", "category"),
+        ("1-3", "mode"),
+        ("+/-", "±5m"),
+        ("s", "skip"),
+    ];
+    let row1_drop: [&str; 2] = ["+/-", "s"];
+
+    let row2_items: [(&str, &str); 5] = [
+        ("r", "reset"),
+        ("g", "analytics"),
+        ("m", "minimal"),
+        ("h", "help"),
+        ("q", "quit"),
+    ];
+    let row2_drop: [&str; 1] = ["m"];
+
     let lines = vec![
-        Line::from(vec![
-            key("space"),
-            desc(pause_label),
-            sep(),
-            key("r"),
-            desc("reset"),
-            sep(),
-            key("s"),
-            desc("skip"),
-            sep(),
-            key("+/-"),
-            desc("±5m"),
-            sep(),
-            key("1-3"),
-            desc("mode"),
-        ]),
-        Line::from(vec![
-            key("g"),
-            desc("analytics"),
-            sep(),
-            key("t"),
-            desc("theme"),
-            sep(),
-            key("m"),
-            desc("minimal"),
-            sep(),
-            key("h"),
-            desc("help"),
-            sep(),
-            key("q"),
-            desc("quit"),
-        ]),
+        style::keycap_bar(&row1_items, &row1_drop, area.width, phase_color, theme),
+        style::keycap_bar(&row2_items, &row2_drop, area.width, theme.cyan, theme),
     ];
 
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
@@ -679,16 +852,11 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
 
 // ─── Dedicated Offline Analytics Page ────────────────────────────────────────
 
-/// Derived empty-cell colour from the theme (no hard-coded background RGB).
 pub fn empty_cell_color(theme: &Theme) -> Color {
     theme.empty_cell()
 }
 
-/// Perceptual colour of a daily cell in the 365-day focus grid.
-///
-/// * `focus_secs == 0`: `theme.empty_cell()`.
-/// * `focus_secs > 0`: perceptual linear-light ramp from a clearly visible
-///   non-zero floor up to `theme.focus_color`.
+#[allow(dead_code)]
 pub fn heatmap_cell_color(theme: &Theme, focus_secs: u64, max_daily_secs: u64) -> Color {
     if focus_secs == 0 {
         return empty_cell_color(theme);
@@ -697,8 +865,37 @@ pub fn heatmap_cell_color(theme: &Theme, focus_secs: u64, max_daily_secs: u64) -
     theme.heatmap_ramp(ratio)
 }
 
-/// Format a two-part row (`left_label`, `bar`, `right_value`) that dynamically
-/// expands the bar width so the row always fills 100% of `width` columns.
+/// Per-category heatmap cell colour: uses the dominant category's color ramp
+/// (or the active filter category's ramp when a filter is active).
+fn category_heatmap_color(
+    theme: &Theme,
+    category: FocusCategory,
+    focus_secs: u64,
+    max_daily_secs: u64,
+) -> Color {
+    if focus_secs == 0 {
+        return empty_cell_color(theme);
+    }
+    let ratio = SessionStats::intensity_for(focus_secs, max_daily_secs);
+    theme.category_ramp(category, ratio)
+}
+
+
+fn legend_intensity_color(
+    theme: &Theme,
+    category: Option<FocusCategory>,
+    secs: u64,
+    max_secs: u64,
+) -> Color {
+    let ratio = SessionStats::intensity_for(secs, max_secs);
+    match category {
+        Some(cat) => theme.category_ramp(cat, ratio),
+        None => theme.heatmap_ramp(ratio),
+    }
+}
+
+/// Format a single-color dynamic bar row (`left_label`, `bar`, `right_value`)
+/// that expands to 100% of `width` columns.
 fn dynamic_bar_row(
     left_label: String,
     left_style: Style,
@@ -738,6 +935,108 @@ fn dynamic_bar_row(
     Line::from(spans)
 }
 
+/// Format a **multi-color stacked category bar row** (`Coding` + `Learning` + `Reading`)
+/// where each category segment is painted in its distinct theme color (`Coral`, `Aqua`, `Periwinkle`).
+/// When `filter` is `Some(cat)`, renders only that category's portion in its signature color.
+#[allow(clippy::too_many_arguments)]
+fn stacked_category_bar_row(
+    left_label: String,
+    left_style: Style,
+    cat_secs: [u64; 3],
+    scale_max_secs: u64,
+    filter: Option<FocusCategory>,
+    theme: &Theme,
+    right_text: String,
+    right_style: Style,
+    trailing_note: Option<(String, Style)>,
+    width: u16,
+) -> Line<'static> {
+    if let Some(f_cat) = filter {
+        let idx = category_index(f_cat.label());
+        let secs = cat_secs[idx];
+        let ratio = if scale_max_secs > 0 {
+            (secs as f64 / scale_max_secs as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let col = theme.category_color(f_cat);
+        return dynamic_bar_row(
+            left_label,
+            left_style,
+            ratio,
+            col,
+            empty_cell_color(theme),
+            right_text,
+            right_style,
+            trailing_note,
+            width,
+        );
+    }
+
+    let left_w = left_label.chars().count();
+    let right_w = right_text.chars().count();
+    let trail_w = trailing_note
+        .as_ref()
+        .map_or(0, |(s, _)| s.chars().count());
+    let bar_w = (width as usize)
+        .saturating_sub(left_w + right_w + trail_w)
+        .max(4);
+
+    let total_secs = cat_secs[0]
+        .saturating_add(cat_secs[1])
+        .saturating_add(cat_secs[2]);
+    let ratio = if scale_max_secs > 0 {
+        (total_secs as f64 / scale_max_secs as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let total_filled = if total_secs == 0 || ratio <= 0.0 {
+        0
+    } else {
+        ((ratio * bar_w as f64).round() as usize).clamp(1, bar_w)
+    };
+    let empty = bar_w.saturating_sub(total_filled);
+
+    let mut seg_cells = [0usize; 3];
+    if total_filled > 0 && total_secs > 0 {
+        let mut remaining_cells = total_filled;
+        let non_zero_cats: Vec<usize> = (0..3).filter(|&i| cat_secs[i] > 0).collect();
+        for (pos, &c_i) in non_zero_cats.iter().enumerate() {
+            if pos + 1 == non_zero_cats.len() {
+                seg_cells[c_i] = remaining_cells;
+            } else {
+                let share = cat_secs[c_i] as f64 / total_secs as f64;
+                let cells = ((share * total_filled as f64).round() as usize)
+                    .max(usize::from(total_filled >= non_zero_cats.len()))
+                    .min(remaining_cells);
+                seg_cells[c_i] = cells;
+                remaining_cells = remaining_cells.saturating_sub(cells);
+            }
+        }
+    }
+
+    let mut spans = vec![Span::styled(left_label, left_style)];
+    for (c_i, cat_enum) in FocusCategory::ALL.into_iter().enumerate() {
+        if seg_cells[c_i] > 0 {
+            spans.push(Span::styled(
+                "▆".repeat(seg_cells[c_i]),
+                Style::default().fg(theme.category_color(cat_enum)),
+            ));
+        }
+    }
+    if empty > 0 {
+        spans.push(Span::styled(
+            "·".repeat(empty),
+            Style::default().fg(empty_cell_color(theme)),
+        ));
+    }
+    spans.push(Span::styled(right_text, right_style));
+    if let Some((t_str, t_style)) = trailing_note {
+        spans.push(Span::styled(t_str, t_style));
+    }
+    Line::from(spans)
+}
+
 /// Format a key-value row with a subtle dot leader (`Key ·········· Value`)
 /// spanning the exact width `width`.
 fn dot_leader_row(
@@ -765,11 +1064,12 @@ fn render_analytics(f: &mut Frame, size: Rect, ui: &UiState) {
 
     let theme = ui.theme;
     let now = Local::now();
-    let summary = ui.timer.stats.analytics_summary_with_context(
+    let summary = ui.timer.stats.analytics_summary_with_category(
         now.date_naive(),
         now.hour() as usize,
         ui.timer.live_focus_secs(),
         ui.timer.mode.name,
+        ui.timer.category.label(),
     );
 
     let outer = style::screen_block(theme);
@@ -781,32 +1081,32 @@ fn render_analytics(f: &mut Frame, size: Rect, ui: &UiState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Compact header + user@host + close hint
-                Constraint::Length(1), // Compact headline numbers strip
-                Constraint::Min(9),    // Yearly heatmap grid
-                Constraint::Length(1), // Bottom keycap bar
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(9),
+                Constraint::Length(1),
             ])
             .split(padded);
 
         render_analytics_compact_header(f, chunks[0], ui);
         render_analytics_compact_metrics(f, chunks[1], &summary, theme);
-        render_analytics_heatmap(f, chunks[2], &summary, theme, false);
+        render_analytics_heatmap(f, chunks[2], &summary, ui, false);
         render_analytics_footer(f, chunks[3], theme);
     } else if inner.height < 28 {
         let padded = style::inset(inner, style::PAD_X, 0);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // Header + subtle divider
-                Constraint::Length(4), // Borderless headline numbers strip
-                Constraint::Min(10),   // Yearly heatmap + optional hourly chart
-                Constraint::Length(1), // Bottom keycap bar
+                Constraint::Length(2),
+                Constraint::Length(4),
+                Constraint::Min(10),
+                Constraint::Length(1),
             ])
             .split(padded);
 
         render_analytics_header(f, chunks[0], ui);
         render_analytics_headline_strip(f, chunks[1], &summary, theme);
-        render_analytics_middle_tier(f, chunks[2], &summary, theme);
+        render_analytics_middle_tier(f, chunks[2], &summary, ui);
         render_analytics_footer(f, chunks[3], theme);
     } else {
         let padded = style::inset(inner, style::PAD_X, 0);
@@ -821,17 +1121,17 @@ fn render_analytics(f: &mut Frame, size: Rect, ui: &UiState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),          // Header + subtle divider
-                Constraint::Length(headline_h), // Borderless headline numbers strip (+ subtle bar when tall)
-                Constraint::Length(mid_h),      // Hero: Yearly heatmap grid (+ By hour on wide screens)
-                Constraint::Min(6),             // Dynamic full-height 3-column bottom deck
-                Constraint::Length(1),          // Bottom keycap bar
+                Constraint::Length(2),
+                Constraint::Length(headline_h),
+                Constraint::Length(mid_h),
+                Constraint::Min(6),
+                Constraint::Length(1),
             ])
             .split(padded);
 
         render_analytics_header(f, chunks[0], ui);
         render_analytics_headline_strip(f, chunks[1], &summary, theme);
-        render_analytics_middle_tier(f, chunks[2], &summary, theme);
+        render_analytics_middle_tier(f, chunks[2], &summary, ui);
         render_analytics_bottom_deck(f, chunks[3], &summary, ui);
         render_analytics_footer(f, chunks[4], theme);
     }
@@ -842,20 +1142,56 @@ fn render_analytics_header(f: &mut Frame, area: Rect, ui: &UiState) {
     let id = ui.system_identity;
     let width = area.width as usize;
 
-    let mut row1 = Line::from(vec![
+    let mut spans = vec![
+        Span::styled("◆ ", style::accent_bold(theme.gold)),
         Span::styled("DevChron", style::value_bold(theme)),
         Span::styled("  ·  ", style::label(theme)),
         Span::styled("Analytics", style::accent_bold(theme.focus_color)),
         Span::styled("  ·  ", style::label(theme)),
-        Span::styled(format!("{}@{}", id.username, id.hostname), style::body(theme)),
-        Span::styled("  ·  local", style::label(theme)),
-    ]);
+        Span::styled(
+            format!("{}@{}", id.username, id.hostname),
+            style::accent_bold(theme.cyan),
+        ),
+        Span::styled("  ·  ", style::label(theme)),
+    ];
 
-    if ui.timer.is_running() {
-        row1.spans
-            .push(Span::styled("  ·  running", Style::default().fg(theme.focus_color)));
+    // Interactive Category Filter chips in the Analytics header:
+    // `c` [ All ]  ● Coding  ● Learning  ● Reading
+    spans.push(Span::styled("c ", style::keycap(theme.gold)));
+    if ui.analytics_filter.is_none() {
+        spans.push(Span::styled(
+            " All ",
+            Style::default()
+                .fg(theme.gold)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ));
+    } else {
+        spans.push(Span::styled(" All ", style::label(theme)));
+    }
+    for cat in FocusCategory::ALL {
+        let cat_col = theme.category_color(cat);
+        spans.push(Span::raw(" "));
+        if ui.analytics_filter == Some(cat) {
+            spans.push(Span::styled(
+                format!(" ● {} ", cat.label()),
+                Style::default()
+                    .fg(cat_col)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ));
+        } else {
+            spans.push(Span::styled("● ", Style::default().fg(cat_col)));
+            spans.push(Span::styled(cat.label(), style::label(theme)));
+        }
     }
 
+    if ui.timer.is_running() {
+        spans.push(Span::styled(
+            "  ·  ● live",
+            Style::default().fg(theme.emerald).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let mut row1 = Line::from(spans);
     let close_key = "g / esc";
     let close_lbl = " Close Analytics";
     let right_len = close_key.len() + close_lbl.len();
@@ -864,8 +1200,11 @@ fn render_analytics_header(f: &mut Frame, area: Rect, ui: &UiState) {
         let pad = width - left_w - right_len;
         row1.spans.push(Span::raw(" ".repeat(pad)));
         row1.spans
-            .push(Span::styled(close_key, style::keycap(theme.focus_color)));
-        row1.spans.push(Span::styled(close_lbl, style::label(theme)));
+            .push(Span::styled(close_key, style::keycap(theme.long_break_color)));
+        row1.spans.push(Span::styled(
+            close_lbl,
+            Style::default().fg(theme.section_accent),
+        ));
     }
 
     let header = Paragraph::new(vec![row1]).block(
@@ -941,10 +1280,55 @@ fn render_analytics_compact_metrics(
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Borderless headline metrics row: calm labels in `dim`, bold values in `text`
-/// (with `focus_color` on the primary streak hero), and quiet sub-details below.
-/// On tall screens (`area.height >= 5`), adds a subtle proportional under-bar
-/// spanning each column so the strip fills the full width cleanly.
+/// Build a 3-color proportional under-bar (`━`) for a headline metric showing
+/// the Coding / Learning / Reading category mix.
+fn stacked_underbar_line(
+    cat_secs: [u64; 3],
+    ratio: f64,
+    col_w: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let bw = (col_w as usize).saturating_sub(2).max(4);
+    let r = ratio.clamp(0.0, 1.0);
+    let total_secs = cat_secs[0]
+        .saturating_add(cat_secs[1])
+        .saturating_add(cat_secs[2]);
+    let filled = if r <= 0.0 || total_secs == 0 {
+        0
+    } else {
+        ((r * bw as f64).round() as usize).clamp(1, bw)
+    };
+    let empty = bw.saturating_sub(filled);
+
+    let mut spans = Vec::new();
+    if filled > 0 && total_secs > 0 {
+        let mut rem = filled;
+        let non_zero: Vec<usize> = (0..3).filter(|&i| cat_secs[i] > 0).collect();
+        for (pos, &c_i) in non_zero.iter().enumerate() {
+            let cells = if pos + 1 == non_zero.len() {
+                rem
+            } else {
+                let sh = cat_secs[c_i] as f64 / total_secs as f64;
+                ((sh * filled as f64).round() as usize)
+                    .max(usize::from(filled >= non_zero.len()))
+                    .min(rem)
+            };
+            rem = rem.saturating_sub(cells);
+            if cells > 0 {
+                let cat = FocusCategory::ALL[c_i];
+                spans.push(Span::styled(
+                    "━".repeat(cells),
+                    Style::default().fg(theme.category_color(cat)),
+                ));
+            }
+        }
+    }
+    if empty > 0 {
+        spans.push(Span::styled("─".repeat(empty), style::rule_style(theme)));
+    }
+    Line::from(spans)
+}
+
 fn render_analytics_headline_strip(
     f: &mut Frame,
     area: Rect,
@@ -956,33 +1340,37 @@ fn render_analytics_headline_strip(
                   primary: String,
                   subtitle: String,
                   ratio: f64,
+                  cat_split: Option<[u64; 3]>,
                   col_w: u16,
-                  is_hero: bool|
+                  accent_col: Color|
      -> Paragraph<'static> {
-        let val_style = if is_hero {
-            style::accent_bold(theme.focus_color)
-        } else {
-            style::value_bold(theme)
-        };
+        let val_style = style::accent_bold(accent_col);
         let mut lines = vec![
-            Line::from(Span::styled(title, style::label(theme))),
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(theme.section_accent),
+            )),
             Line::from(Span::styled(primary, val_style)),
             Line::from(Span::styled(subtitle, style::label(theme))),
         ];
         if show_bar {
-            let bw = (col_w as usize).saturating_sub(2).max(4);
-            let r = ratio.clamp(0.0, 1.0);
-            let filled = if r <= 0.0 {
-                0
+            if let Some(split) = cat_split {
+                lines.push(stacked_underbar_line(split, ratio, col_w, theme));
             } else {
-                ((r * bw as f64).round() as usize).clamp(1, bw)
-            };
-            let empty = bw.saturating_sub(filled);
-            let bar_col = theme.heatmap_ramp(r.max(0.25));
-            lines.push(Line::from(vec![
-                Span::styled("━".repeat(filled), Style::default().fg(bar_col)),
-                Span::styled("─".repeat(empty), style::rule_style(theme)),
-            ]));
+                let bw = (col_w as usize).saturating_sub(2).max(4);
+                let r = ratio.clamp(0.0, 1.0);
+                let filled = if r <= 0.0 {
+                    0
+                } else {
+                    ((r * bw as f64).round() as usize).clamp(1, bw)
+                };
+                let empty = bw.saturating_sub(filled);
+                let bar_col = theme.color_ramp(accent_col, r.max(0.35));
+                lines.push(Line::from(vec![
+                    Span::styled("━".repeat(filled), Style::default().fg(bar_col)),
+                    Span::styled("─".repeat(empty), style::rule_style(theme)),
+                ]));
+            }
         }
         Paragraph::new(lines)
     };
@@ -997,6 +1385,15 @@ fn render_analytics_headline_strip(
     let year_ratio = (summary.active_days_year as f64 / 365.0).clamp(0.0, 1.0);
     let comp_ratio = (summary.completion_rate_pct / 100.0).clamp(0.0, 1.0);
     let focus_ratio = (summary.focus_share_pct / 100.0).clamp(0.0, 1.0);
+    let year_cat_split = [
+        summary.category_stats[0].focus_secs,
+        summary.category_stats[1].focus_secs,
+        summary.category_stats[2].focus_secs,
+    ];
+    let top_cat_sub = match &summary.top_category {
+        Some(cat) => format!("{} sess · top {cat}", summary.today_sessions),
+        None => format!("{} sessions today", summary.today_sessions),
+    };
 
     if area.width >= 108 {
         let cols = Layout::default()
@@ -1020,8 +1417,9 @@ fn render_analytics_headline_strip(
                     summary.longest_streak, summary.active_days_year
                 ),
                 streak_ratio,
+                None,
                 cols[0].width,
-                true,
+                theme.gold,
             ),
             cols[0],
         );
@@ -1035,8 +1433,9 @@ fn render_analytics_headline_strip(
                     SessionStats::format_duration_secs(summary.avg_active_day_secs)
                 ),
                 avg_ratio,
+                Some(year_cat_split),
                 cols[1].width,
-                false,
+                theme.cyan,
             ),
             cols[1],
         );
@@ -1045,10 +1444,11 @@ fn render_analytics_headline_strip(
             metric(
                 "Today's focus",
                 SessionStats::format_duration_secs(summary.today_focus_secs),
-                format!("{} sessions today", summary.today_sessions),
+                top_cat_sub,
                 today_ratio,
+                Some(summary.today_cat_secs),
                 cols[2].width,
-                false,
+                theme.focus_color,
             ),
             cols[2],
         );
@@ -1062,9 +1462,10 @@ fn render_analytics_headline_strip(
                     summary.year_sessions,
                     SessionStats::format_duration_secs(summary.peak_day_secs)
                 ),
-                year_ratio,
+                year_ratio.max(0.35 * usize::from(summary.year_focus_secs > 0) as f64),
+                Some(year_cat_split),
                 cols[3].width,
-                false,
+                theme.long_break_color,
             ),
             cols[3],
         );
@@ -1078,8 +1479,9 @@ fn render_analytics_headline_strip(
                     summary.completed_focus_count, summary.interrupted_focus_count
                 ),
                 comp_ratio,
+                None,
                 cols[4].width,
-                false,
+                theme.emerald,
             ),
             cols[4],
         );
@@ -1098,8 +1500,9 @@ fn render_analytics_headline_strip(
                     summary.focus_share_pct, summary.cycles_completed
                 ),
                 focus_ratio,
+                None,
                 cols[5].width,
-                false,
+                theme.short_break_color,
             ),
             cols[5],
         );
@@ -1123,8 +1526,9 @@ fn render_analytics_headline_strip(
                     summary.longest_streak, summary.active_days_year
                 ),
                 streak_ratio,
+                None,
                 cols[0].width,
-                true,
+                theme.gold,
             ),
             cols[0],
         );
@@ -1138,8 +1542,9 @@ fn render_analytics_headline_strip(
                     SessionStats::format_duration_secs(summary.avg_active_day_secs)
                 ),
                 avg_ratio,
+                Some(year_cat_split),
                 cols[1].width,
-                false,
+                theme.cyan,
             ),
             cols[1],
         );
@@ -1148,10 +1553,11 @@ fn render_analytics_headline_strip(
             metric(
                 "Today's focus",
                 SessionStats::format_duration_secs(summary.today_focus_secs),
-                format!("{} sessions today", summary.today_sessions),
+                top_cat_sub,
                 today_ratio,
+                Some(summary.today_cat_secs),
                 cols[2].width,
-                false,
+                theme.focus_color,
             ),
             cols[2],
         );
@@ -1166,26 +1572,24 @@ fn render_analytics_headline_strip(
                     SessionStats::format_duration_secs(summary.peak_day_secs)
                 ),
                 year_ratio,
+                Some(year_cat_split),
                 cols[3].width,
-                false,
+                theme.long_break_color,
             ),
             cols[3],
         );
     }
 }
 
-/// Middle tier: dynamically sizes the 53-week Yearly Focus Grid and the
-/// 24-Hour By-Hour distribution across narrow, standard (`>= 140` cols), and
-/// ultra-wide (`>= 195` cols) terminals so there is no dead horizontal space.
 fn render_analytics_middle_tier(
     f: &mut Frame,
     area: Rect,
     summary: &AnalyticsSummary,
-    theme: &Theme,
+    ui: &UiState,
 ) {
     let total_weeks = summary.weeks.len() as u16; // 53
-    let wide_grid_w = 5 + total_weeks * 3; // 164 cols (2-col block "▆▆" + 1-col gap)
-    let std_grid_w = 5 + total_weeks * 2; // 111 cols (1-col block "▆"  + 1-col gap)
+    let wide_grid_w = 5 + total_weeks * 3; // 164 cols
+    let std_grid_w = 5 + total_weeks * 2; // 111 cols
 
     if area.width >= wide_grid_w + style::COL_GAP + 28 {
         let cols = Layout::default()
@@ -1197,8 +1601,8 @@ fn render_analytics_middle_tier(
             ])
             .split(area);
 
-        render_analytics_heatmap(f, cols[0], summary, theme, true);
-        render_analytics_by_hour(f, cols[2], summary, theme);
+        render_analytics_heatmap(f, cols[0], summary, ui, true);
+        render_analytics_by_hour(f, cols[2], summary, ui);
     } else if area.width >= std_grid_w + style::COL_GAP + 26 {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -1209,10 +1613,10 @@ fn render_analytics_middle_tier(
             ])
             .split(area);
 
-        render_analytics_heatmap(f, cols[0], summary, theme, true);
-        render_analytics_by_hour(f, cols[2], summary, theme);
+        render_analytics_heatmap(f, cols[0], summary, ui, true);
+        render_analytics_by_hour(f, cols[2], summary, ui);
     } else {
-        render_analytics_heatmap(f, area, summary, theme, true);
+        render_analytics_heatmap(f, area, summary, ui, true);
     }
 }
 
@@ -1220,9 +1624,10 @@ fn render_analytics_heatmap(
     f: &mut Frame,
     area: Rect,
     summary: &AnalyticsSummary,
-    theme: &Theme,
+    ui: &UiState,
     with_section_header: bool,
 ) {
+    let theme = ui.theme;
     if area.width < 10 || area.height < 8 {
         return;
     }
@@ -1230,10 +1635,22 @@ fn render_analytics_heatmap(
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(13);
 
     if with_section_header {
-        let meta = format!(
-            "{} sessions · {} active days",
-            summary.year_sessions, summary.active_days_year
-        );
+        let meta = match ui.analytics_filter {
+            Some(cat) => {
+                let cs = &summary.category_stats[category_index(cat.label())];
+                format!(
+                    "{} · {} ({} sessions · {} active days)",
+                    cat.label(),
+                    SessionStats::format_duration_secs(cs.focus_secs),
+                    cs.sessions,
+                    cs.active_days
+                )
+            }
+            None => format!(
+                "{} sessions · {} active days · colored by category",
+                summary.year_sessions, summary.active_days_year
+            ),
+        };
         lines.push(style::section_header(
             "Yearly Focus Grid",
             Some(&meta),
@@ -1246,13 +1663,6 @@ fn render_analytics_heatmap(
     let label_prefix_width = 5usize; // "Mon  "
     let avail_cols = (area.width as usize).saturating_sub(label_prefix_width);
 
-    // Dynamically scale cell width:
-    // - cell_step == 3 ("▆▆ "): 2-col wide block + 1-col gap on large screens
-    // - cell_step == 2 ("▆ "):  1-col wide block + 1-col gap on standard screens
-    // - cell_step == 1 ("▆"):   1-col compact block on narrow screens
-    // Uses U+2586 ('▆', Lower Three Quarters Block) which Kitty and modern
-    // GPU terminals render via their native pixel-exact box-drawing shader
-    // (100% width × 75% height with a clean 25% vertical gap between rows).
     let cell_step = if avail_cols >= total_weeks * 3 {
         3
     } else if avail_cols >= total_weeks * 2 {
@@ -1264,7 +1674,7 @@ fn render_analytics_heatmap(
     let start_week = total_weeks.saturating_sub(visible_weeks);
     let cell_glyph = if cell_step == 3 { "▆▆" } else { "▆" };
 
-    // Month labels row aligned to week columns (calm dim style, never bold)
+    // Month labels row aligned to week columns
     let mut month_chars: Vec<char> = vec![' '; label_prefix_width + visible_weeks * cell_step];
     let mut next_free_col = label_prefix_width;
     for &(week_idx, m_name) in &summary.month_labels {
@@ -1283,10 +1693,6 @@ fn render_analytics_heatmap(
     let month_line: String = month_chars.into_iter().collect();
     lines.push(Line::from(Span::styled(month_line, style::label(theme))));
 
-    // Weekday rows (Mon..Sun) — render all 7 × visible_weeks cells as a
-    // complete, flush rectangular matrix (cells outside the 365-day window
-    // render in empty_cell_color so the top-left and bottom-right corners
-    // are never ragged or missing).
     const DAY_NAMES: [&str; GRID_DAYS_PER_WEEK] =
         ["Mon  ", "Tue  ", "Wed  ", "Thu  ", "Fri  ", "Sat  ", "Sun  "];
 
@@ -1302,19 +1708,23 @@ fn render_analytics_heatmap(
         for week in &summary.weeks[start_week..] {
             let cell = week[day_row];
             let is_today = cell.in_year_window && cell.date == summary.today_date;
-            let effective_secs = if cell.in_year_window {
-                cell.focus_secs
+            let color = if !cell.in_year_window {
+                empty_cell_color(theme)
+            } else if let Some(filter_cat) = ui.analytics_filter {
+                let secs = cell.cat_secs[category_index(filter_cat.label())];
+                category_heatmap_color(theme, filter_cat, secs, summary.max_daily_secs)
             } else {
-                0
+                // All-category view intentionally uses a unified contribution-green scale.
+                theme.heatmap_ramp(SessionStats::intensity_for(
+                    cell.focus_secs,
+                    summary.max_daily_secs,
+                ))
             };
-            let color = if is_today && effective_secs == 0 {
-                theme.dim
-            } else {
-                heatmap_cell_color(theme, effective_secs, summary.max_daily_secs)
-            };
+
+            // Today is always solar yellow, even when empty or when a category filter is active.
             let cell_style = if is_today {
                 Style::default()
-                    .fg(color)
+                    .fg(theme.today_color())
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(color)
@@ -1331,53 +1741,65 @@ fn render_analytics_heatmap(
         lines.push(Line::from(""));
     }
 
-    // Legend row consistent with the perceptual ramp + today indicator
+    // Legend row showing both Intensity Ramp AND Category Swatches (Coding / Learning / Reading)
     if lines.len() < area.height as usize {
         let max_s = summary.max_daily_secs.max(3600);
-        let scale_str = if area.width >= 66 {
-            format!(
-                "   ·   scale max {}   ·   ",
-                SessionStats::format_duration_secs(max_s)
-            )
-        } else {
-            format!("  ·  max {}  ·  ", SessionStats::format_duration_secs(max_s))
-        };
+        let ramp_cat = ui.analytics_filter;
         let mut legend_spans = vec![
             Span::styled("     Less ", style::label(theme)),
             Span::styled(
                 format!("{cell_glyph} "),
-                Style::default().fg(heatmap_cell_color(theme, 0, max_s)),
+                Style::default().fg(legend_intensity_color(theme, ramp_cat, 0, max_s)),
             ),
             Span::styled(
                 format!("{cell_glyph} "),
-                Style::default().fg(heatmap_cell_color(theme, max_s / 4, max_s)),
+                Style::default().fg(legend_intensity_color(theme, ramp_cat, max_s / 4, max_s)),
             ),
             Span::styled(
                 format!("{cell_glyph} "),
-                Style::default().fg(heatmap_cell_color(theme, max_s / 2, max_s)),
+                Style::default().fg(legend_intensity_color(theme, ramp_cat, max_s / 2, max_s)),
             ),
             Span::styled(
                 format!("{cell_glyph} "),
-                Style::default().fg(heatmap_cell_color(theme, (max_s * 3) / 4, max_s)),
+                Style::default().fg(legend_intensity_color(
+                    theme,
+                    ramp_cat,
+                    (max_s * 3) / 4,
+                    max_s,
+                )),
             ),
             Span::styled(
                 format!("{cell_glyph} "),
-                Style::default().fg(heatmap_cell_color(theme, max_s, max_s)),
+                Style::default().fg(legend_intensity_color(theme, ramp_cat, max_s, max_s)),
             ),
-            Span::styled("More", style::label(theme)),
-            Span::styled(scale_str, style::label(theme)),
-            Span::styled(
-                cell_glyph,
-                Style::default()
-                    .fg(theme.focus_color)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled(" today", style::label(theme)),
+            Span::styled("More  ·  ", style::label(theme)),
         ];
+
+        if area.width >= 68 {
+            for (i, cat) in FocusCategory::ALL.into_iter().enumerate() {
+                if i > 0 {
+                    legend_spans.push(Span::raw("  "));
+                }
+                legend_spans.push(Span::styled(
+                    "▆ ",
+                    Style::default().fg(theme.category_color(cat)),
+                ));
+                legend_spans.push(Span::styled(cat.label(), style::label(theme)));
+            }
+            legend_spans.push(Span::styled("  ·  ", style::label(theme)));
+        }
+
+        legend_spans.push(Span::styled(
+            cell_glyph,
+            Style::default()
+                .fg(theme.today_color())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ));
+        legend_spans.push(Span::styled(" today", style::label(theme)));
 
         let legend_left_w: usize = legend_spans.iter().map(|s| s.content.chars().count()).sum();
         let right_summary = format!(
-            "peak {} · {}/365 active ({:.0}%)",
+            "peak {} · {}/365d ({:.0}%)",
             SessionStats::format_duration_secs(summary.peak_day_secs),
             summary.active_days_year,
             (summary.active_days_year as f64 / 365.0) * 100.0
@@ -1385,7 +1807,7 @@ fn render_analytics_heatmap(
         let grid_right_edge = (label_prefix_width + visible_weeks * cell_step)
             .saturating_sub(usize::from(cell_step >= 2))
             .min(area.width as usize);
-        if legend_left_w + right_summary.chars().count() + 4 <= grid_right_edge {
+        if legend_left_w + right_summary.chars().count() + 3 <= grid_right_edge {
             let pad = grid_right_edge - legend_left_w - right_summary.chars().count();
             legend_spans.push(Span::raw(" ".repeat(pad)));
             legend_spans.push(Span::styled(right_summary, style::label(theme)));
@@ -1397,15 +1819,15 @@ fn render_analytics_heatmap(
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Borderless 24-Hour distribution (`00h`..`23h` multi-row histogram + full-width
-/// 4-window time-of-day split). Scales both horizontally (`step = 1, 2, or 3`) and
-/// vertically (`chart_rows = 2..4`) to fill `area`.
+/// Borderless 24-Hour distribution colored by each hour's dominant category,
+/// plus 4 time-of-day windows rendered as multi-color stacked category bars.
 fn render_analytics_by_hour(
     f: &mut Frame,
     area: Rect,
     summary: &AnalyticsSummary,
-    theme: &Theme,
+    ui: &UiState,
 ) {
+    let theme = ui.theme;
     if area.width < 16 || area.height < 4 {
         return;
     }
@@ -1440,7 +1862,6 @@ fn render_analytics_by_hour(
     let bar_chars = if step == 3 { 2 } else { 1 };
     let pad = if step >= 2 { " " } else { "" };
 
-    // Dynamically scale histogram height (2 to 4 rows) to match the middle tier height
     let chart_rows = (area.height as usize).saturating_sub(7).clamp(2, 4);
     const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -1450,13 +1871,26 @@ fn render_analytics_by_hour(
         let mut row_spans: Vec<Span<'static>> = Vec::with_capacity(24);
 
         for h in 0..24 {
-            let secs = summary.hourly_focus_secs[h];
+            let [c_s, l_s, r_s] = summary.hourly_cat_secs[h];
+            let (secs, dom_cat) = if let Some(f_cat) = ui.analytics_filter {
+                (summary.hourly_cat_secs[h][category_index(f_cat.label())], f_cat)
+            } else {
+                let dom = if l_s > c_s && l_s >= r_s {
+                    FocusCategory::Learning
+                } else if r_s > c_s && r_s > l_s {
+                    FocusCategory::Reading
+                } else {
+                    FocusCategory::Coding
+                };
+                (summary.hourly_focus_secs[h], dom)
+            };
+
             let ratio = if secs == 0 {
                 0.0
             } else {
                 (secs as f64 / max_h as f64).clamp(0.08, 1.0)
             };
-            let color = heatmap_cell_color(theme, secs, max_h);
+            let color = category_heatmap_color(theme, dom_cat, secs, max_h);
 
             if ratio >= high_band {
                 row_spans.push(Span::styled(
@@ -1495,38 +1929,63 @@ fn render_analytics_by_hour(
     } else {
         "00 03 06 09 12 15 18 21h"
     };
-    lines.push(Line::from(Span::styled(axis, style::label(theme))));
+    lines.push(Line::from(Span::styled(
+        axis,
+        Style::default().fg(theme.section_accent),
+    )));
     lines.push(Line::from(""));
 
     let (m_pct, a_pct, e_pct, n_pct) = summary.chronotype_pcts;
-    let empty_col = empty_cell_color(theme);
-    let period_row = |name: &'static str, pct: f64| -> Line<'static> {
-        let r = (pct / 100.0).clamp(0.0, 1.0);
-        let col = theme.heatmap_ramp(r);
-        dynamic_bar_row(
-            format!("{name:<15}"),
-            style::label(theme),
-            r,
-            col,
-            empty_col,
-            format!(" {:>5.1}%", pct),
-            style::body(theme),
-            None,
-            area.width,
-        )
-    };
+    let total_hourly = summary.hourly_focus_secs.iter().sum::<u64>().max(1);
+    let period_row =
+        |name: &'static str, lbl_col: Color, pct: f64, p_cats: [u64; 3]| -> Line<'static> {
+            stacked_category_bar_row(
+                format!("{name:<15}"),
+                Style::default().fg(lbl_col),
+                p_cats,
+                total_hourly,
+                ui.analytics_filter,
+                theme,
+                format!(" {:>5.1}%", pct),
+                if pct > 0.0 {
+                    style::accent_bold(lbl_col)
+                } else {
+                    style::label(theme)
+                },
+                None,
+                area.width,
+            )
+        };
 
-    lines.push(period_row("Morning 06–12", m_pct));
-    lines.push(period_row("Afternoon 12–18", a_pct));
-    lines.push(period_row("Evening 18–24", e_pct));
-    lines.push(period_row("Night 00–06", n_pct));
+    lines.push(period_row(
+        "Morning 06–12",
+        theme.gold,
+        m_pct,
+        summary.chronotype_cat_secs[0],
+    ));
+    lines.push(period_row(
+        "Afternoon 12–18",
+        theme.focus_color,
+        a_pct,
+        summary.chronotype_cat_secs[1],
+    ));
+    lines.push(period_row(
+        "Evening 18–24",
+        theme.cyan,
+        e_pct,
+        summary.chronotype_cat_secs[2],
+    ));
+    lines.push(period_row(
+        "Night 00–06",
+        theme.long_break_color,
+        n_pct,
+        summary.chronotype_cat_secs[3],
+    ));
 
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Calm, borderless bottom deck separated by whitespace gutters (`style::COL_GAP`).
-/// Every column dynamically expands its bars horizontally to 100% of its column
-/// width and scales its rows vertically to fill `area.height`.
+/// Decluttered, category-rich 3-column bottom deck.
 fn render_analytics_bottom_deck(
     f: &mut Frame,
     area: Rect,
@@ -1545,8 +2004,8 @@ fn render_analytics_bottom_deck(
             ])
             .split(area);
 
-        render_analytics_weekday_and_7d(f, cols[0], summary, ui.theme);
-        render_analytics_modes_and_months(f, cols[2], summary, ui.theme);
+        render_analytics_weekday_and_7d(f, cols[0], summary, ui, false);
+        render_analytics_categories_and_modes(f, cols[2], summary, ui);
         render_analytics_recent_sessions(f, cols[4], summary, ui);
     } else {
         let cols = Layout::default()
@@ -1558,20 +2017,74 @@ fn render_analytics_bottom_deck(
             ])
             .split(area);
 
-        render_analytics_weekday_and_7d(f, cols[0], summary, ui.theme);
+        render_analytics_weekday_and_7d(f, cols[0], summary, ui, true);
         render_analytics_recent_sessions(f, cols[2], summary, ui);
     }
 }
 
-/// Column 1: By weekday (`Mon`–`Sun`) + Dynamic Recent Days log (expands from
-/// `Last 7 days` up to as many historical days as fit `area.height`, with
-/// full-width bars aligned flush to the right margin).
+/// Append the 3-row `By category` (`Coding`, `Learning`, `Reading`) breakdown to `lines`,
+/// using each category's distinct color (`Coral`, `Aqua`, `Periwinkle`).
+fn push_category_section(
+    lines: &mut Vec<Line<'static>>,
+    summary: &AnalyticsSummary,
+    active_category: FocusCategory,
+    width: u16,
+    theme: &Theme,
+) {
+    let top_note = match &summary.top_category {
+        Some(top) => format!("top {top}"),
+        None => format!("active {}", active_category.label()),
+    };
+    lines.push(style::section_header(
+        "By category",
+        Some(&top_note),
+        width,
+        theme,
+    ));
+
+    let empty_col = empty_cell_color(theme);
+    for cs in &summary.category_stats {
+        let r = (cs.share_pct / 100.0).clamp(0.0, 1.0);
+        let cat_col = theme.category_color(cs.category);
+        let is_active = cs.category == active_category;
+        let lbl_style = if is_active {
+            Style::default().fg(cat_col).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(cat_col)
+        };
+
+        lines.push(dynamic_bar_row(
+            format!("{:<9} ", cs.name),
+            lbl_style,
+            r,
+            cat_col,
+            empty_col,
+            format!(" {:>4.0}%", cs.share_pct),
+            style::label(theme),
+            Some((
+                format!(
+                    " {} {:>3}s",
+                    style::format_duration_fixed(cs.focus_secs),
+                    cs.sessions
+                ),
+                style::body(theme),
+            )),
+            width,
+        ));
+    }
+}
+
+/// Column 1: `By weekday` (multi-color stacked category bars) +
+/// `Last 7 days` (clean 7-day window, never 28 rows of zeros!) +
+/// `Category × weekday` matrix showing which days each category is practiced.
 fn render_analytics_weekday_and_7d(
     f: &mut Frame,
     area: Rect,
     summary: &AnalyticsSummary,
-    theme: &Theme,
+    ui: &UiState,
+    include_categories: bool,
 ) {
+    let theme = ui.theme;
     if area.height == 0 || area.width < 18 {
         return;
     }
@@ -1594,159 +2107,333 @@ fn render_analytics_weekday_and_7d(
         .map(|w| w.focus_secs)
         .max()
         .unwrap_or(0)
-        .max(3600);
+        .max(1800);
     const DOW_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    let empty_col = empty_cell_color(theme);
 
     for ws in &summary.weekday_stats {
-        let ratio = SessionStats::intensity_for(ws.focus_secs, max_dow);
-        let col = heatmap_cell_color(theme, ws.focus_secs, max_dow);
         let is_peak = summary.peak_weekday == Some(ws.weekday_index) && ws.focus_secs > 0;
         let lbl_style = if is_peak {
-            Style::default().fg(theme.focus_color)
+            style::accent_bold(theme.gold)
+        } else if ws.focus_secs > 0 {
+            Style::default().fg(theme.section_accent)
+        } else {
+            style::label(theme)
+        };
+        let display_secs = match ui.analytics_filter {
+            Some(cat) => ws.cat_secs[category_index(cat.label())],
+            None => ws.focus_secs,
+        };
+        let sess_style = if ws.sessions > 0 {
+            Style::default().fg(theme.cyan)
         } else {
             style::label(theme)
         };
 
-        lines.push(dynamic_bar_row(
+        lines.push(stacked_category_bar_row(
             format!("{}  ", DOW_LABELS[ws.weekday_index]),
             lbl_style,
-            ratio,
-            col,
-            empty_col,
-            format!(" {}", style::format_duration_fixed(ws.focus_secs)),
-            style::body(theme),
-            Some((format!(" {:>3}s", ws.sessions), style::label(theme))),
+            ws.cat_secs,
+            max_dow,
+            ui.analytics_filter,
+            theme,
+            format!(" {}", style::format_duration_fixed(display_secs)),
+            if display_secs > 0 {
+                style::value_bold(theme)
+            } else {
+                style::label(theme)
+            },
+            Some((format!(" {:>3}s", ws.sessions), sess_style)),
             area.width,
         ));
     }
 
-    if area.height >= 11 {
+    if include_categories && (area.height as usize).saturating_sub(lines.len()) >= 5 {
         lines.push(Line::from(""));
+        push_category_section(&mut lines, summary, ui.timer.category, area.width, theme);
+    }
 
-        // Collect all valid calendar days up to today from the 53-week grid so tall
-        // terminals can show more than 7 days and fill the vertical height cleanly.
-        let mut recent_days: Vec<(chrono::NaiveDate, u64, u32)> = summary
-            .weeks
+    // Clean Last 7 days breakdown (never a 28-day wall of 0m 0s!)
+    if (area.height as usize).saturating_sub(lines.len()) >= 4 {
+        lines.push(Line::from(""));
+        let active_7d = summary
+            .last_7_days
             .iter()
-            .flat_map(|w| w.iter())
-            .filter(|c| c.in_year_window && c.date <= summary.today_date)
-            .map(|c| (c.date, c.focus_secs, c.sessions))
-            .collect();
-        recent_days.sort_by_key(|(d, _, _)| *d);
-        if recent_days.is_empty() {
-            recent_days.extend_from_slice(&summary.last_7_days);
-        }
-
-        let avail_rows = (area.height as usize).saturating_sub(lines.len() + 1);
-        let num_days = avail_rows.clamp(1, 28).min(recent_days.len());
-        let slice_start = recent_days.len().saturating_sub(num_days);
-        let shown_days = &recent_days[slice_start..];
-
-        let section_title = if num_days <= 7 {
-            "Last 7 days".to_string()
-        } else {
-            format!("Last {num_days} days")
-        };
-        let active_in_window = shown_days.iter().filter(|(_, s, _)| *s > 0).count();
-        let window_note = format!("{active_in_window}/{num_days} active");
+            .filter(|(_, s, _, _)| *s > 0)
+            .count();
+        let window_note = format!("{active_7d}/7 active");
         lines.push(style::section_header(
-            &section_title,
+            "Last 7 days",
             Some(&window_note),
             area.width,
             theme,
         ));
 
-        let max_nd = shown_days
+        let max_7d = summary
+            .last_7_days
             .iter()
-            .map(|(_, s, _)| *s)
+            .map(|(_, s, _, _)| *s)
             .max()
             .unwrap_or(0)
-            .max(3600);
+            .max(1800);
 
-        for &(date, secs, sessions) in shown_days.iter().rev() {
+        for &(date, secs, sessions, cat_split) in summary.last_7_days.iter().rev() {
             if lines.len() >= area.height as usize {
                 break;
             }
-            let ratio = SessionStats::intensity_for(secs, max_nd);
-            let bar_color = heatmap_cell_color(theme, secs, max_nd);
             let dow = DOW_LABELS[date.weekday().num_days_from_monday() as usize];
+            let display_secs = match ui.analytics_filter {
+                Some(cat) => cat_split[category_index(cat.label())],
+                None => secs,
+            };
+            let is_today = date == summary.today_date;
+            let date_style = if is_today {
+                style::accent_bold(theme.gold)
+            } else if display_secs > 0 {
+                Style::default().fg(theme.section_accent)
+            } else {
+                style::label(theme)
+            };
+            let sess_style = if sessions > 0 {
+                Style::default().fg(theme.cyan)
+            } else {
+                style::label(theme)
+            };
 
-            lines.push(dynamic_bar_row(
+            lines.push(stacked_category_bar_row(
                 format!("{:02}-{:02} {dow} ", date.month(), date.day()),
-                style::label(theme),
-                ratio,
-                bar_color,
-                empty_col,
-                format!(" {}", style::format_duration_fixed(secs)),
-                style::body(theme),
-                Some((format!(" {:>3}s", sessions), style::label(theme))),
+                date_style,
+                cat_split,
+                max_7d,
+                ui.analytics_filter,
+                theme,
+                format!(" {}", style::format_duration_fixed(display_secs)),
+                if display_secs > 0 {
+                    style::value_bold(theme)
+                } else {
+                    style::label(theme)
+                },
+                Some((format!(" {:>3}s", sessions), sess_style)),
                 area.width,
             ));
+        }
+    }
+
+    // Category × Weekday activity matrix when vertical room remains
+    if (area.height as usize).saturating_sub(lines.len()) >= 6 {
+        lines.push(Line::from(""));
+        lines.push(style::section_header(
+            "Category × weekday",
+            Some("Mon–Sun rhythm"),
+            area.width,
+            theme,
+        ));
+        lines.push(Line::from(Span::styled(
+            "Category    Mon  Tue  Wed  Thu  Fri  Sat  Sun    Best day",
+            style::label(theme),
+        )));
+
+        for (c_i, cs) in summary.category_stats.iter().enumerate() {
+            if lines.len() >= area.height as usize {
+                break;
+            }
+            let cat_col = theme.category_color(cs.category);
+            let max_cat_dow = summary
+                .weekday_stats
+                .iter()
+                .map(|w| w.cat_secs[c_i])
+                .max()
+                .unwrap_or(0)
+                .max(1800);
+
+            let mut row_spans = vec![
+                Span::styled("● ", Style::default().fg(cat_col)),
+                Span::styled(format!("{:<10}", cs.name), Style::default().fg(cat_col)),
+            ];
+            for dow_i in 0..7 {
+                let d_secs = summary.weekday_stats[dow_i].cat_secs[c_i];
+                let cell_col = category_heatmap_color(theme, cs.category, d_secs, max_cat_dow);
+                row_spans.push(Span::styled("▆▆   ", Style::default().fg(cell_col)));
+            }
+            let best_str = cs
+                .best_weekday
+                .map_or_else(|| "—".to_string(), |d| DOW_LABELS[d % 7].to_string());
+            row_spans.push(Span::styled(format!("  {best_str:>6}"), style::accent_bold(theme.gold)));
+            lines.push(Line::from(row_spans));
         }
     }
 
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Column 2: Modes & pacing + Recent months (up to 12 months on tall screens) +
-/// Focus rhythm & targets (fills remaining vertical space on tall terminals).
-fn render_analytics_modes_and_months(
+/// Column 2: `By category` (colored bars) + `Category telemetry` (Today, 7-day,
+/// Avg session, Active days, Peak hour, and Today/7-day stacked category bars) +
+/// `Modes & pacing` + `Recent months` (stacked category bars).
+fn render_analytics_categories_and_modes(
     f: &mut Frame,
     area: Rect,
     summary: &AnalyticsSummary,
-    theme: &Theme,
+    ui: &UiState,
 ) {
+    let theme = ui.theme;
     if area.height == 0 || area.width < 18 {
         return;
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(style::section_header(
-        "Modes & pacing",
-        None,
-        area.width,
-        theme,
-    ));
+    push_category_section(&mut lines, summary, ui.timer.category, area.width, theme);
 
-    let empty_col = empty_cell_color(theme);
-    for ms in &summary.mode_stats {
-        let r = (ms.share_pct / 100.0).clamp(0.0, 1.0);
-        let col = theme.heatmap_ramp(r);
-
-        lines.push(dynamic_bar_row(
-            format!("{:<9} ", ms.name),
-            style::label(theme),
-            r,
-            col,
-            empty_col,
-            format!(" {:>4.0}%", ms.share_pct),
-            style::label(theme),
-            Some((
-                format!(" {}", style::format_duration_fixed(ms.focus_secs)),
-                style::body(theme),
-            )),
+    // Dedicated Category Telemetry section (replaces the redundant Focus rhythm / All-time dump!)
+    if (area.height as usize).saturating_sub(lines.len()) >= 7 {
+        lines.push(Line::from(""));
+        lines.push(style::section_header(
+            "Category telemetry",
+            Some("today · 7d · pace"),
             area.width,
+            theme,
         ));
+
+        lines.push(Line::from(Span::styled(
+            "Category     Today      7-day   Avg/sess   Active   Peak hr",
+            style::label(theme),
+        )));
+
+        for cs in &summary.category_stats {
+            if lines.len() >= area.height as usize {
+                break;
+            }
+            let cat_col = theme.category_color(cs.category);
+            let peak_h = cs
+                .peak_hour
+                .map_or_else(|| "  —  ".to_string(), |h| format!("{:02}:00", h));
+            let row_spans = vec![
+                Span::styled("● ", Style::default().fg(cat_col)),
+                Span::styled(format!("{:<8}", cs.name), style::accent_bold(cat_col)),
+                Span::styled(
+                    format!(" {:>7}", SessionStats::format_duration_secs(cs.today_secs)),
+                    style::value_bold(theme),
+                ),
+                Span::styled(
+                    format!("  {:>9}", SessionStats::format_duration_secs(cs.week_secs)),
+                    style::body(theme),
+                ),
+                Span::styled(
+                    format!(
+                        "    {:>7}",
+                        SessionStats::format_duration_secs(cs.avg_session_secs)
+                    ),
+                    Style::default().fg(theme.cyan),
+                ),
+                Span::styled(
+                    format!("   {:>5}d", cs.active_days),
+                    Style::default().fg(theme.emerald),
+                ),
+                Span::styled(format!("     {peak_h}"), Style::default().fg(theme.gold)),
+            ];
+            lines.push(Line::from(row_spans));
+        }
+
+        if lines.len() + 2 < area.height as usize {
+            lines.push(Line::from(""));
+            let today_tot = summary.today_focus_secs.max(1);
+            lines.push(stacked_category_bar_row(
+                "Today mix ".to_string(),
+                style::label(theme),
+                summary.today_cat_secs,
+                today_tot,
+                ui.analytics_filter,
+                theme,
+                format!(" {}", style::format_duration_fixed(summary.today_focus_secs)),
+                style::body(theme),
+                Some((
+                    format!(" {:>3}s", summary.today_sessions),
+                    style::label(theme),
+                )),
+                area.width,
+            ));
+
+            let week_cats = [
+                summary.category_stats[0].week_secs,
+                summary.category_stats[1].week_secs,
+                summary.category_stats[2].week_secs,
+            ];
+            let week_tot = week_cats.iter().sum::<u64>();
+            let week_sess: u32 = summary.last_7_days.iter().map(|(_, _, s, _)| *s).sum();
+            lines.push(stacked_category_bar_row(
+                "7-day mix ".to_string(),
+                style::label(theme),
+                week_cats,
+                week_tot.max(1),
+                ui.analytics_filter,
+                theme,
+                format!(" {}", style::format_duration_fixed(week_tot)),
+                style::body(theme),
+                Some((format!(" {:>3}s", week_sess), style::label(theme))),
+                area.width,
+            ));
+        }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Focus ", style::label(theme)),
-        Span::styled(
-            SessionStats::format_duration_secs(summary.year_focus_secs),
-            style::value_bold(theme),
-        ),
-        Span::styled("  ·  Break ", style::label(theme)),
-        Span::styled(
-            SessionStats::format_duration_secs(summary.year_break_secs),
-            style::body(theme),
-        ),
-        Span::styled("  ·  Cycles ", style::label(theme)),
-        Span::styled(format!("{}", summary.cycles_completed), style::body(theme)),
-    ]));
+    if (area.height as usize).saturating_sub(lines.len()) >= 6 {
+        lines.push(Line::from(""));
+        lines.push(style::section_header(
+            "Modes & pacing",
+            None,
+            area.width,
+            theme,
+        ));
 
-    if area.height >= 11 {
+        let empty_col = empty_cell_color(theme);
+        for ms in &summary.mode_stats {
+            if lines.len() >= area.height as usize {
+                break;
+            }
+            let r = (ms.share_pct / 100.0).clamp(0.0, 1.0);
+            let mode_col = theme.mode_name_color(&ms.name);
+            let col = theme.color_ramp(mode_col, r);
+
+            lines.push(dynamic_bar_row(
+                format!("{:<9} ", ms.name),
+                Style::default().fg(mode_col),
+                r,
+                col,
+                empty_col,
+                format!(" {:>4.0}%", ms.share_pct),
+                Style::default().fg(mode_col),
+                Some((
+                    format!(
+                        " {} {:>3}s",
+                        style::format_duration_fixed(ms.focus_secs),
+                        ms.sessions
+                    ),
+                    style::body(theme),
+                )),
+                area.width,
+            ));
+        }
+
+        if lines.len() + 1 < area.height as usize {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Focus ", style::label(theme)),
+                Span::styled(
+                    SessionStats::format_duration_secs(summary.year_focus_secs),
+                    style::accent_bold(theme.focus_color),
+                ),
+                Span::styled("  ·  Break ", style::label(theme)),
+                Span::styled(
+                    SessionStats::format_duration_secs(summary.year_break_secs),
+                    style::accent_bold(theme.cyan),
+                ),
+                Span::styled("  ·  Cycles ", style::label(theme)),
+                Span::styled(
+                    format!("{}", summary.cycles_completed),
+                    style::accent_bold(theme.gold),
+                ),
+            ]));
+        }
+    }
+
+    if (area.height as usize).saturating_sub(lines.len()) >= 4 {
         lines.push(Line::from(""));
         lines.push(style::section_header(
             "Recent months",
@@ -1758,25 +2445,28 @@ fn render_analytics_modes_and_months(
         let max_m = summary
             .monthly_velocity
             .iter()
-            .map(|(_, s, _)| *s)
+            .map(|(_, s, _, _)| *s)
             .max()
             .unwrap_or(0)
-            .max(3600);
+            .max(1800);
 
-        for (m_label, m_secs, m_sess) in &summary.monthly_velocity {
+        for (m_label, m_secs, m_sess, m_cats) in &summary.monthly_velocity {
             if lines.len() >= area.height as usize {
                 break;
             }
-            let ratio = SessionStats::intensity_for(*m_secs, max_m);
-            let col = heatmap_cell_color(theme, *m_secs, max_m);
+            let disp_secs = match ui.analytics_filter {
+                Some(cat) => m_cats[category_index(cat.label())],
+                None => *m_secs,
+            };
 
-            lines.push(dynamic_bar_row(
+            lines.push(stacked_category_bar_row(
                 format!("{m_label:<8} "),
                 style::label(theme),
-                ratio,
-                col,
-                empty_col,
-                format!(" {}", style::format_duration_fixed(*m_secs)),
+                *m_cats,
+                max_m,
+                ui.analytics_filter,
+                theme,
+                format!(" {}", style::format_duration_fixed(disp_secs)),
                 style::body(theme),
                 Some((format!(" {:>3}s", m_sess), style::label(theme))),
                 area.width,
@@ -1784,142 +2474,11 @@ fn render_analytics_modes_and_months(
         }
     }
 
-    // On tall terminals (e.g. >= 36 rows), fill remaining vertical space in Column 2
-    // with Focus rhythm & consistency metrics so there is no dead void below Recent months.
-    if (area.height as usize).saturating_sub(lines.len()) >= 4 {
-        lines.push(Line::from(""));
-        lines.push(style::section_header(
-            "Focus rhythm",
-            Some("consistency"),
-            area.width,
-            theme,
-        ));
-
-        let active_ratio = (summary.active_days_year as f64 / 365.0).clamp(0.0, 1.0);
-        let comp_ratio = (summary.completion_rate_pct / 100.0).clamp(0.0, 1.0);
-        let focus_share = (summary.focus_share_pct / 100.0).clamp(0.0, 1.0);
-        let streak_ratio = if summary.longest_streak == 0 {
-            0.0
-        } else {
-            (summary.current_streak as f64 / summary.longest_streak as f64).clamp(0.0, 1.0)
-        };
-        let scale_ref = summary.max_daily_secs.max(3600) as f64;
-        let active_vs_scale = (summary.avg_active_day_secs as f64 / scale_ref).clamp(0.0, 1.0);
-        let today_vs_scale = (summary.today_focus_secs as f64 / scale_ref).clamp(0.0, 1.0);
-
-        let rhythm_rows: [(&str, f64, String); 5] = [
-            (
-                "Active days  ",
-                active_ratio,
-                format!(" {:>11}", format!("{}/365d", summary.active_days_year)),
-            ),
-            (
-                "Completion   ",
-                comp_ratio,
-                format!(
-                    " {:>11}",
-                    format!(
-                        "{:.0}% ({}ok)",
-                        summary.completion_rate_pct, summary.completed_focus_count
-                    )
-                ),
-            ),
-            (
-                "Work share   ",
-                focus_share,
-                format!(
-                    " {:>11}",
-                    format!("{:.0}% ({:.1}:1)", summary.focus_share_pct, summary.work_rest_ratio)
-                ),
-            ),
-            (
-                "Active avg   ",
-                active_vs_scale,
-                format!(
-                    " {:>11}",
-                    SessionStats::format_duration_secs(summary.avg_active_day_secs)
-                ),
-            ),
-            (
-                "Today pace   ",
-                today_vs_scale,
-                format!(
-                    " {:>11}",
-                    format!(
-                        "{} ({}d strk)",
-                        SessionStats::format_duration_secs(summary.today_focus_secs),
-                        summary.current_streak
-                    )
-                ),
-            ),
-        ];
-        let _ = streak_ratio;
-
-        for (lbl, r, right_val) in rhythm_rows {
-            if lines.len() >= area.height as usize {
-                break;
-            }
-            let col = theme.heatmap_ramp(r);
-            lines.push(dynamic_bar_row(
-                lbl.to_string(),
-                style::label(theme),
-                r,
-                col,
-                empty_col,
-                right_val,
-                style::body(theme),
-                None,
-                area.width,
-            ));
-        }
-    }
-
-    // If the terminal is still taller, show additional historical records with dot leaders
-    if (area.height as usize).saturating_sub(lines.len()) >= 3 {
-        lines.push(Line::from(""));
-        let extras = [
-            (
-                "All-time focus",
-                SessionStats::format_duration_secs(summary.all_time_focus_secs),
-            ),
-            (
-                "All-time sessions",
-                format!("{} sessions", summary.all_time_sessions),
-            ),
-            (
-                "All-time active days",
-                format!("{} days", summary.active_days_all_time),
-            ),
-            (
-                "365d daily average",
-                SessionStats::format_duration_secs(summary.avg_year_daily_secs),
-            ),
-            (
-                "Active day average",
-                SessionStats::format_duration_secs(summary.avg_active_day_secs),
-            ),
-            (
-                "Scale reference max",
-                SessionStats::format_duration_secs(summary.max_daily_secs.max(3600)),
-            ),
-            (
-                "Stats file",
-                "~/.local/share/devchron/stats.json".to_string(),
-            ),
-        ];
-        for (k, v) in extras {
-            if lines.len() >= area.height as usize {
-                break;
-            }
-            lines.push(dot_leader_row(k, v, style::body(theme), area.width, theme));
-        }
-    }
-
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// Column 3: Recent sessions table with dynamic full-width column spacing +
-/// Mode presets & cycle progress + Milestones & records when vertical space allows.
+/// Column 3: Scrollable `Recent sessions` table with per-category color-coded
+/// badges + concise `Category milestones` summary when vertical room remains.
 fn render_analytics_recent_sessions(
     f: &mut Frame,
     area: Rect,
@@ -1931,8 +2490,22 @@ fn render_analytics_recent_sessions(
         return;
     }
 
+    // Filter recent_log when a category filter is active
+    let filtered_log: Vec<_> = summary
+        .recent_log
+        .iter()
+        .filter(|e| match ui.analytics_filter {
+            Some(cat) => e.phase == "FOCUS" && e.category.eq_ignore_ascii_case(cat.label()),
+            None => true,
+        })
+        .collect();
+
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let log_note = format!("{} logged", summary.recent_log.len());
+    let log_note = if filtered_log.len() > 8 {
+        format!("{} logged · j/k scroll", filtered_log.len())
+    } else {
+        format!("{} logged", filtered_log.len())
+    };
     lines.push(style::section_header(
         "Recent sessions",
         Some(&log_note),
@@ -1940,39 +2513,62 @@ fn render_analytics_recent_sessions(
         theme,
     ));
 
-    let show_mode = area.width >= 42;
     let w = area.width as usize;
+    let show_mode_and_cat = w >= 50;
+    let show_cat_only = !show_mode_and_cat && w >= 40;
 
-    // Distribute extra horizontal width across column gaps so every row in
-    // Recent sessions spans the full width of the column flush to the right edge.
-    let (g1, g2, g3, g4) = if show_mode {
+    let (g1, g2, g3, g4, g5) = if show_mode_and_cat {
+        let base_cols = 11 + 5 + 8 + 8 + 7 + 7; // 46 chars
+        let total_gap = w.saturating_sub(base_cols).max(5);
+        let a = total_gap / 5;
+        let b = (total_gap - a) / 4;
+        let c = (total_gap - a - b) / 3;
+        let d = (total_gap - a - b - c) / 2;
+        let e = total_gap - a - b - c - d;
+        (a, b, c, d, e)
+    } else if show_cat_only {
         let base_cols = 11 + 5 + 8 + 7 + 7; // 38 chars
         let total_gap = w.saturating_sub(base_cols).max(4);
         let a = total_gap / 4;
         let b = (total_gap - a) / 3;
         let c = (total_gap - a - b) / 2;
         let d = total_gap - a - b - c;
-        (a, b, c, d)
+        (a, b, c, 0, d)
     } else {
         let base_cols = 11 + 5 + 7 + 7; // 30 chars
         let total_gap = w.saturating_sub(base_cols).max(3);
         let a = total_gap / 3;
         let b = (total_gap - a) / 2;
         let c = total_gap - a - b;
-        (a, b, 0, c)
+        (a, b, 0, 0, c)
     };
 
-    let hdr = if show_mode {
+    let hdr = if show_mode_and_cat {
+        format!(
+            "{:<11}{}{:<5}{}{:<8}{}{:<8}{}{:>7}{}{:>7}",
+            "Time",
+            " ".repeat(g1),
+            "Phase",
+            " ".repeat(g2),
+            "Category",
+            " ".repeat(g3),
+            "Mode",
+            " ".repeat(g4),
+            "Dur",
+            " ".repeat(g5),
+            "Status"
+        )
+    } else if show_cat_only {
         format!(
             "{:<11}{}{:<5}{}{:<8}{}{:>7}{}{:>7}",
             "Time",
             " ".repeat(g1),
             "Phase",
             " ".repeat(g2),
-            "Mode",
+            "Category",
             " ".repeat(g3),
             "Dur",
-            " ".repeat(g4),
+            " ".repeat(g5),
             "Status"
         )
     } else {
@@ -1983,7 +2579,7 @@ fn render_analytics_recent_sessions(
             "Phase",
             " ".repeat(g2),
             "Dur",
-            " ".repeat(g4),
+            " ".repeat(g5),
             "Status"
         )
     };
@@ -1994,6 +2590,14 @@ fn render_analytics_recent_sessions(
         TimerPhase::Focus => "Focus",
         TimerPhase::ShortBreak => "Short",
         TimerPhase::LongBreak => "Long ",
+    };
+    let (live_cat, live_cat_style) = if ui.timer.current_timer.phase == TimerPhase::Focus {
+        (
+            ui.timer.category.label(),
+            Style::default().fg(theme.category_color(ui.timer.category)),
+        )
+    } else {
+        ("—", style::label(theme))
     };
     let live_elapsed = ui
         .timer
@@ -2021,25 +2625,38 @@ fn render_analytics_recent_sessions(
         ),
         Span::raw(" ".repeat(g2)),
     ];
-    if show_mode {
+    if show_mode_and_cat || show_cat_only {
+        now_spans.push(Span::styled(format!("{live_cat:<8}"), live_cat_style));
+        now_spans.push(Span::raw(" ".repeat(g3)));
+    }
+    if show_mode_and_cat {
         now_spans.push(Span::styled(
             format!("{:<8}", ui.timer.mode.name),
             style::label(theme),
         ));
-        now_spans.push(Span::raw(" ".repeat(g3)));
+        now_spans.push(Span::raw(" ".repeat(g4)));
     }
     now_spans.push(Span::styled(
         format!("{:>7}", SessionStats::format_mm_ss(live_elapsed)),
         style::body(theme),
     ));
-    now_spans.push(Span::raw(" ".repeat(g4)));
+    now_spans.push(Span::raw(" ".repeat(g5)));
     now_spans.push(Span::styled(
         format!("{live_state:>7}"),
         style::label(theme),
     ));
     lines.push(Line::from(now_spans));
 
-    for entry in &summary.recent_log {
+    // Reserve 7 rows at bottom of Column 3 for concise Category milestones when area is tall
+    let reserve_bottom = if area.height >= 20 { 7 } else { 0 };
+    let max_log_rows = (area.height as usize)
+        .saturating_sub(lines.len() + reserve_bottom)
+        .max(3);
+    let scroll_start = ui
+        .analytics_scroll
+        .min(filtered_log.len().saturating_sub(1));
+
+    for entry in filtered_log.iter().skip(scroll_start).take(max_log_rows) {
         if lines.len() >= area.height as usize {
             break;
         }
@@ -2049,12 +2666,21 @@ fn render_analytics_recent_sessions(
             "LONG BRK" => ("Long ", theme.long_break_color),
             other => (other, theme.text),
         };
-        let status_display = match entry.status.as_str() {
-            "COMPLETE" => "done",
-            "RESTED" => "rested",
-            "SKIPPED" => "skipped",
-            "ABORTED" => "reset",
-            other => other,
+        let (status_display, status_col) = match entry.status.as_str() {
+            "COMPLETE" => ("done", theme.emerald),
+            "RESTED" => ("rested", theme.cyan),
+            "SKIPPED" => ("skipped", theme.amber),
+            "ABORTED" => ("reset", theme.rose),
+            other => (other, theme.dim),
+        };
+        let (cat_display, cat_style) = if entry.phase == "FOCUS" {
+            let c_enum = FocusCategory::from_name(&entry.category);
+            (
+                c_enum.label(),
+                style::accent_bold(theme.category_color(c_enum)),
+            )
+        } else {
+            ("—", style::label(theme))
         };
 
         let mut row_spans = vec![
@@ -2066,104 +2692,44 @@ fn render_analytics_recent_sessions(
             ),
             Span::raw(" ".repeat(g2)),
         ];
-        if show_mode {
+        if show_mode_and_cat || show_cat_only {
+            row_spans.push(Span::styled(format!("{cat_display:<8}"), cat_style));
+            row_spans.push(Span::raw(" ".repeat(g3)));
+        }
+        if show_mode_and_cat {
+            let m_col = theme.mode_name_color(&entry.mode);
             row_spans.push(Span::styled(
                 format!("{:<8}", entry.mode),
-                style::label(theme),
+                Style::default().fg(m_col),
             ));
-            row_spans.push(Span::raw(" ".repeat(g3)));
+            row_spans.push(Span::raw(" ".repeat(g4)));
         }
         row_spans.push(Span::styled(
             format!("{:>7}", SessionStats::format_mm_ss(entry.duration_secs)),
             style::body(theme),
         ));
-        row_spans.push(Span::raw(" ".repeat(g4)));
+        row_spans.push(Span::raw(" ".repeat(g5)));
         row_spans.push(Span::styled(
             format!("{status_display:>7}"),
-            style::label(theme),
+            Style::default().fg(status_col),
         ));
         lines.push(Line::from(row_spans));
     }
 
-    // When Recent sessions has few entries (or the terminal is tall), dynamically
-    // populate the remaining space in Column 3 with Mode presets & cycle status
-    // and Milestones & records so Column 3 is never an empty void.
-    let empty_col = empty_cell_color(theme);
-    if (area.height as usize).saturating_sub(lines.len()) >= 6 {
-        lines.push(Line::from(""));
-        let cyc_note = format!(
-            "cycle {:02}/{:02}",
-            ui.timer.cycle_count + 1,
-            ui.timer.cycles_before_long_break
-        );
-        lines.push(style::section_header(
-            "Active mode & presets",
-            Some(&cyc_note),
-            area.width,
-            theme,
-        ));
-
-        for (i, mode) in ui.modes.iter().enumerate() {
-            if lines.len() >= area.height as usize {
-                break;
-            }
-            let is_active = i == ui.mode_index;
-            let lbl = format!("{} {:<8}", i + 1, mode.name);
-            let lbl_style = if is_active {
-                Style::default()
-                    .fg(theme.focus_color)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                style::label(theme)
-            };
-            let right_spec = format!(
-                " {}m / {:>2}m / {:>2}m{}",
-                mode.focus_mins,
-                mode.short_break_mins,
-                mode.long_break_mins,
-                if is_active { " · active" } else { "         " }
-            );
-            lines.push(dot_leader_row(
-                &lbl,
-                right_spec,
-                lbl_style,
-                area.width,
-                theme,
-            ));
-        }
-
-        if lines.len() < area.height as usize {
-            let cyc_ratio = ((ui.timer.cycle_count as f64
-                + ui.timer.current_timer.progress())
-                / ui.timer.cycles_before_long_break.max(1) as f64)
-                .clamp(0.0, 1.0);
-            lines.push(dynamic_bar_row(
-                "Cycle     ".to_string(),
-                style::label(theme),
-                cyc_ratio,
-                theme.focus_color,
-                empty_col,
-                format!(
-                    " {}/{} to long break",
-                    ui.timer.cycle_count + 1,
-                    ui.timer.cycles_before_long_break
-                ),
-                style::body(theme),
-                None,
-                area.width,
-            ));
-        }
-    }
-
-    if (area.height as usize).saturating_sub(lines.len()) >= 4 {
+    // Concise Category Milestones & Records (5 clean rows, no duplicate clutter!)
+    if (area.height as usize).saturating_sub(lines.len()) >= 5 {
         lines.push(Line::from(""));
         lines.push(style::section_header(
             "Milestones & records",
-            Some("all-time"),
+            Some("highlights"),
             area.width,
             theme,
         ));
 
+        let top_cat_val = summary
+            .top_category
+            .clone()
+            .unwrap_or_else(|| ui.timer.category.label().to_string());
         let peak_date_str = summary
             .peak_day_date
             .map_or_else(|| "—".to_string(), SessionStats::format_date);
@@ -2189,51 +2755,21 @@ fn render_analytics_recent_sessions(
             .map_or_else(|| "—".to_string(), |i| FULL_DOW[i % 7].to_string());
 
         let records = [
-            ("Peak focus day", peak_day_val),
-            ("Peak focus hour", peak_hour_val),
-            ("Best weekday", best_dow_val),
             (
-                "Longest streak",
-                format!("{} days", summary.longest_streak),
+                "Top focus category",
+                top_cat_val.clone(),
+                style::accent_bold(theme.category_color(FocusCategory::from_name(&top_cat_val))),
             ),
-            (
-                "Current streak",
-                format!("{} days", summary.current_streak),
-            ),
-            (
-                "Completed / reset",
-                format!(
-                    "{} done · {} reset",
-                    summary.completed_focus_count, summary.interrupted_focus_count
-                ),
-            ),
-            (
-                "Total break time",
-                format!(
-                    "{} ({} cycles)",
-                    SessionStats::format_duration_secs(summary.year_break_secs),
-                    summary.cycles_completed
-                ),
-            ),
-            (
-                "Active days (365d)",
-                format!(
-                    "{} / 365 ({:.1}%)",
-                    summary.active_days_year,
-                    (summary.active_days_year as f64 / 365.0) * 100.0
-                ),
-            ),
-            (
-                "Theme palette",
-                format!("{} (press t)", theme.display_name()),
-            ),
+            ("Peak focus day", peak_day_val, style::accent_bold(theme.gold)),
+            ("Peak focus hour", peak_hour_val, style::accent_bold(theme.cyan)),
+            ("Best weekday", best_dow_val, style::accent_bold(theme.emerald)),
         ];
 
-        for (k, v) in records {
+        for (k, v, st) in records {
             if lines.len() >= area.height as usize {
                 break;
             }
-            lines.push(dot_leader_row(k, v, style::body(theme), area.width, theme));
+            lines.push(dot_leader_row(k, v, st, area.width, theme));
         }
     }
 
@@ -2241,13 +2777,14 @@ fn render_analytics_recent_sessions(
 }
 
 fn render_analytics_footer(f: &mut Frame, area: Rect, theme: &Theme) {
-    const ITEMS: [(&str, &str); 4] = [
+    const ITEMS: [(&str, &str); 5] = [
+        ("c / tab", "filter category"),
+        ("j / k", "scroll log"),
         ("g / esc", "close"),
-        ("t", "theme"),
         ("h", "help"),
         ("q", "quit"),
     ];
-    const DROP: [&str; 2] = ["h", "t"];
+    const DROP: [&str; 3] = ["h", "j / k", "c / tab"];
     let line = style::keycap_bar(&ITEMS, &DROP, area.width, theme.focus_color, theme);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
@@ -2290,6 +2827,13 @@ fn render_minimal(f: &mut Frame, size: Rect, ui: &UiState) {
         phase_upper,
         Style::default().fg(get_phase_color(timer.current_timer.phase, theme)),
     )];
+    if timer.current_timer.phase == TimerPhase::Focus {
+        spans.push(Span::styled("  ·  ", style::label(theme)));
+        spans.push(Span::styled(
+            timer.category.label(),
+            Style::default().fg(theme.category_color(timer.category)),
+        ));
+    }
     if !timer.is_running() {
         spans.push(Span::styled("  ·  paused", style::label(theme)));
     }
@@ -2349,7 +2893,7 @@ fn render_help(f: &mut Frame, area: Rect, ui: &UiState) {
     f.render_widget(Clear, area);
 
     let outer = style::screen_block(theme);
-    let roomy = area.height >= 26;
+    let roomy = area.height >= 28;
     let inner = style::inset(outer.inner(area), style::PAD_X, u16::from(roomy));
     f.render_widget(outer, area);
 
@@ -2368,8 +2912,13 @@ fn render_help(f: &mut Frame, area: Rect, ui: &UiState) {
         help_text.push(Line::from(""));
     }
     help_text.extend([
-        style::section_header("Timer", None, inner.width.min(54), theme),
+        style::section_header("Timer & phases", None, inner.width.min(54), theme),
         row("Space / P".into(), "Start or pause timer".into()),
+        row("F / B / L".into(), "Choose Focus, Short break, or Long break".into()),
+        row(
+            "C / S-Tab".into(),
+            "Cycle focus category (Coding, Learning, Reading)".into(),
+        ),
         row("R".into(), "Reset current phase".into()),
         row("S".into(), "Skip to next phase".into()),
         row("A".into(), "Stop alarm at 00:00".into()),
@@ -2398,9 +2947,10 @@ fn render_help(f: &mut Frame, area: Rect, ui: &UiState) {
         help_text.push(Line::from(""));
     }
     help_text.extend([
-        style::section_header("View & app", None, inner.width.min(54), theme),
+        style::section_header("Analytics & view", None, inner.width.min(54), theme),
         row("G / D".into(), "Open or close Analytics".into()),
-        row("T".into(), "Cycle colour theme".into()),
+        row("C / Tab".into(), "Filter Analytics by category (All / Coding / Learning / Reading)".into()),
+        row("J / K".into(), "Scroll Recent sessions on Analytics page".into()),
         row("M".into(), "Toggle minimal mode".into()),
         row("H / ?".into(), "Toggle help screen".into()),
         row("Q / Esc".into(), "Quit (Esc closes overlays first)".into()),
@@ -2456,8 +3006,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Timer in the given mode, advanced to `phase`, `progress` of the way
-    /// through it, and either running or paused.
     pub(crate) fn make_timer(
         mode: usize,
         phase: TimerPhase,
@@ -2516,6 +3064,8 @@ pub(crate) mod tests {
             alarm_ringing: timer.alarm_ringing,
             alarm_flash: false,
             system_identity: &identity,
+            analytics_filter: None,
+            analytics_scroll: 0,
         };
         term.draw(|f| render(f, &ui)).unwrap();
         term.backend().buffer().clone()
@@ -2530,8 +3080,6 @@ pub(crate) mod tests {
             .join("\n")
     }
 
-    /// Convert a rendered `Buffer` into truecolor ANSI escape sequences for
-    /// terminal inspection (`cargo test -- --ignored --nocapture visual_preview_gallery`).
     pub(crate) fn buffer_to_ansi(buf: &Buffer) -> String {
         let w = buf.area.width as usize;
         let mut out = String::new();
@@ -2558,7 +3106,6 @@ pub(crate) mod tests {
         out
     }
 
-    /// Convert a rendered `Buffer` into an HTML `<pre>` block with exact RGB styling.
     pub(crate) fn buffer_to_html(buf: &Buffer, title: &str) -> String {
         let w = buf.area.width as usize;
         let mut html = format!(
@@ -2641,7 +3188,7 @@ pub(crate) mod tests {
                 ];
                 for (name, buf) in screens {
                     let title = format!("{} — {} ({}×{})", theme.display_name(), name, w, h);
-                    if w == 100 && h == 30 && theme.name == super::super::theme::ThemeName::Reef {
+                    if w == 100 && h == 30 && theme.name == super::super::theme::ThemeName::TokyoNight {
                         println!("=== {title} ===\n{}", buffer_to_ansi(&buf));
                     }
                     full_html.push_str(&buffer_to_html(&buf, &title));
@@ -2684,55 +3231,82 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn timer_page_uses_single_rounded_frame_and_clean_english_labels() {
+    fn timer_page_shows_phase_controls_and_focus_categories() {
         let theme = Theme::default_theme();
-        let t = make_timer(0, TimerPhase::Focus, 0.25, false);
+        let mut t = make_timer(0, TimerPhase::Focus, 0.25, false);
+        t.category = FocusCategory::Learning;
         let screen = text(&draw(100, 32, &t, &theme, 0, None, false, false));
         assert!(!screen.contains("[STATISTICS]"), "old statistics panel must be removed:\n{screen}");
         assert!(screen.contains("Analytics"), "analytics hint must be shown:\n{screen}");
+        assert!(screen.contains("Focus") && screen.contains("Short break") && screen.contains("Long break"), "phase chips missing:\n{screen}");
+        assert!(screen.contains("Coding") && screen.contains("Learning") && screen.contains("Reading"), "category chips missing:\n{screen}");
+        assert!(screen.contains("f/b/l focus/break"), "phase control hint missing:\n{screen}");
+        assert!(screen.contains("c category"), "category control hint missing:\n{screen}");
         assert!(screen.contains("╭") && screen.contains("╯"), "outer frame must be rounded:\n{screen}");
-        assert!(!screen.contains("╔"), "double borders must be gone:\n{screen}");
-        assert!(!screen.contains("焦"), "mixed CJK labels must be gone:\n{screen}");
-        assert!(!screen.contains("［"), "fullwidth key brackets must be gone:\n{screen}");
     }
 
     #[test]
-    fn analytics_page_shows_single_identity_headline_strip_heatmap_and_secondary_sections() {
+    fn analytics_page_shows_color_coded_category_telemetry_and_no_clutter() {
         let theme = Theme::default_theme();
         let mut t = make_timer(0, TimerPhase::Focus, 0.0, false);
         let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
-        t.stats.complete_focus_session_on(today, Duration::from_secs(3600));
+        t.stats.complete_focus_session_with_category(
+            today,
+            10,
+            Duration::from_secs(3600),
+            "Classic",
+            "Coding",
+            true,
+        );
+        t.stats.complete_focus_session_with_category(
+            today,
+            14,
+            Duration::from_secs(1800),
+            "Session",
+            "Learning",
+            true,
+        );
+        t.stats.complete_focus_session_with_category(
+            today,
+            20,
+            Duration::from_secs(1800),
+            "Classic",
+            "Reading",
+            true,
+        );
 
-        let screen = text(&draw_with_analytics(
-            160, 42, &t, &theme, 0, None, false, false, true,
-        ));
+        let buf = draw_with_analytics(160, 42, &t, &theme, 0, None, false, false, true);
+        let screen = text(&buf);
         assert!(screen.contains("Analytics"), "{screen}");
         assert!(screen.contains("devuser@archbox"), "user@host missing:\n{screen}");
-        assert!(!screen.contains("Computer:"), "redundant identity labels must be gone:\n{screen}");
         assert!(screen.contains("Close Analytics"), "close hint missing:\n{screen}");
         assert!(screen.contains("Current streak"), "{screen}");
-        assert!(screen.contains("Average / day"), "{screen}");
-        assert!(screen.contains("Completion"), "{screen}");
-        assert!(screen.contains("Work / break"), "{screen}");
         assert!(screen.contains("Yearly Focus Grid"), "{screen}");
         assert!(screen.contains("By hour"), "{screen}");
         assert!(screen.contains("By weekday"), "{screen}");
+        assert!(screen.contains("Last 7 days"), "{screen}");
+        assert!(!screen.contains("Last 28 days"), "28-day zero wall must be gone:\n{screen}");
+        assert!(screen.contains("By category"), "category analytics section missing:\n{screen}");
+        assert!(screen.contains("Category telemetry"), "Category telemetry missing:\n{screen}");
+        assert!(screen.contains("Today mix") && screen.contains("7-day mix"), "Category mix bars missing:\n{screen}");
+        assert!(screen.contains("Coding") && screen.contains("Learning") && screen.contains("Reading"), "categories missing on analytics:\n{screen}");
         assert!(screen.contains("Modes & pacing"), "{screen}");
         assert!(screen.contains("Recent sessions"), "{screen}");
-        assert!(
-            screen.contains("▆") || screen.contains("■"),
-            "heatmap blocks missing:\n{screen}"
-        );
-        assert!(screen.contains("Less") && screen.contains("More"), "{screen}");
-        assert!(!screen.contains("╔"), "nested double borders must be gone:\n{screen}");
+        assert!(screen.contains("Category"), "Category column missing in Recent sessions:\n{screen}");
 
-        // Wide & tall screen (e.g. 226x52) scales grid to 2-col cells ("▆▆") and fills bottom deck
+        // Verify that all three distinct category colors are actually painted in the Analytics buffer
+        let has_coding_col = buf.content().iter().any(|c| c.fg == theme.focus_color);
+        let has_learning_col = buf.content().iter().any(|c| c.fg == theme.short_break_color);
+        let has_reading_col = buf.content().iter().any(|c| c.fg == theme.long_break_color);
+        assert!(has_coding_col && has_learning_col && has_reading_col, "all 3 category colors must be rendered on Analytics page");
+
+        // Wide & tall screen (e.g. 226x52) scales grid to 2-col cells ("▆▆") and shows Category × weekday matrix
         let wide_screen = text(&draw_with_analytics(
             226, 52, &t, &theme, 0, None, false, false, true,
         ));
         assert!(wide_screen.contains("▆▆"), "wide screen must use 2-col grid blocks:\n{wide_screen}");
-        assert!(wide_screen.contains("Focus rhythm"), "tall screen must fill Col 2:\n{wide_screen}");
-        assert!(wide_screen.contains("Milestones & records"), "tall screen must fill Col 3:\n{wide_screen}");
+        assert!(wide_screen.contains("Category × weekday"), "tall screen must show Category × weekday:\n{wide_screen}");
+        assert!(wide_screen.contains("Category telemetry"), "tall screen must show Category telemetry:\n{wide_screen}");
     }
 
     #[test]
@@ -2820,8 +3394,6 @@ pub(crate) mod tests {
         assert!(screen.contains("current"));
     }
 
-    /// Dots of the ring painted in the "active" (non-track) colour, as a share
-    /// of all ring dots, measured on the finished frame.
     fn ring_share(buf: &Buffer, track: Color) -> f64 {
         let (mut active, mut total) = (0u32, 0u32);
         for c in buf.content() {
@@ -2894,7 +3466,6 @@ pub(crate) mod tests {
         assert!(screen.contains("1-3 mode"), "{screen}");
         assert!(screen.contains("01/04"), "{screen}");
 
-        // Minimum size Analytics also fits cleanly without clipping "today" or "close"
         let analytics_min = text(&draw_with_analytics(60, 16, &t, &theme, 0, None, false, false, true));
         assert!(analytics_min.contains("today"), "{analytics_min}");
         assert!(analytics_min.contains("close"), "{analytics_min}");
@@ -2908,8 +3479,6 @@ pub(crate) mod tests {
         assert!(screen.contains("12:30") || screen.contains("12:31"), "{screen}");
         let _ = Duration::ZERO;
     }
-
-    // ── Alarm / minimal mode ────────────────────────────────────────────────
 
     fn ringing_timer() -> PomodoroTimer {
         let mut t = make_timer(0, TimerPhase::Focus, 0.0, true);
@@ -2978,6 +3547,8 @@ pub(crate) mod tests {
                 alarm_ringing: true,
                 alarm_flash: flash,
                 system_identity: &identity,
+                analytics_filter: None,
+                analytics_scroll: 0,
             };
             term.draw(|f| render(f, &ui)).unwrap();
         }

@@ -11,10 +11,13 @@ pub struct StatusUpdate {
     pub session: String,
     pub is_running: bool,
     pub percentage_complete: u16,
-    /// Active Pomodoro mode ("Classic", "Session", ...). Added in addition to
+    /// Active Pomodoro mode ("classic", "session", ...). Added in addition to
     /// the original keys, so existing status-bar scripts keep working.
     #[serde(default)]
     pub mode: String,
+    /// Active Focus category ("coding", "learning", "reading").
+    #[serde(default)]
+    pub category: String,
     /// True while the 00:00 alarm is ringing (additive key).
     #[serde(default)]
     pub alarm_ringing: bool,
@@ -65,6 +68,7 @@ impl StatusWriter {
             is_running: timer.is_running(),
             percentage_complete: timer.current_timer.percentage_complete(),
             mode: timer.mode.name.to_lowercase(),
+            category: timer.category.label().to_lowercase(),
             alarm_ringing: timer.alarm_ringing,
         };
 

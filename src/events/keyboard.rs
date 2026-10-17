@@ -1,3 +1,4 @@
+use crate::timer::TimerPhase;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,11 +9,20 @@ pub enum Action {
     TogglePause,
     Reset,
     Skip,
+    /// Directly choose Focus (`F`) or Long Break (`L`) on the timer page.
+    SelectPhase(TimerPhase),
+    /// Choose Break time (`B`): switches to Short Break (or Long Break if already on Short Break).
+    ToggleBreak,
+    /// Cycle the Focus category (`C` / `Shift+Tab`): Coding -> Learning -> Reading -> Coding
+    /// (or cycle the category filter on the Analytics page).
+    CycleCategory,
+    /// Scroll up in Analytics session history (`Up` / `K`).
+    ScrollUp,
+    /// Scroll down in Analytics session history (`Down` / `J`).
+    ScrollDown,
     ToggleHelp,
     /// Open or close the dedicated Analytics page (G / D / I)
     ToggleAnalytics,
-    /// Cycle to the next colour theme (T)
-    CycleTheme,
     /// Add 5 minutes to the current phase (+)
     AddTime,
     /// Subtract 5 minutes from the current phase (-)
@@ -40,6 +50,12 @@ pub fn handle_key(key: KeyEvent) -> Action {
         KeyCode::Char(' ') | KeyCode::Char('p') | KeyCode::Char('P') => Action::TogglePause,
         KeyCode::Char('r') | KeyCode::Char('R') => Action::Reset,
         KeyCode::Char('s') | KeyCode::Char('S') => Action::Skip,
+        KeyCode::Char('f') | KeyCode::Char('F') => Action::SelectPhase(TimerPhase::Focus),
+        KeyCode::Char('b') | KeyCode::Char('B') => Action::ToggleBreak,
+        KeyCode::Char('l') | KeyCode::Char('L') => Action::SelectPhase(TimerPhase::LongBreak),
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::BackTab => Action::CycleCategory,
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => Action::ScrollUp,
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => Action::ScrollDown,
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('g')
         | KeyCode::Char('G')
@@ -47,7 +63,6 @@ pub fn handle_key(key: KeyEvent) -> Action {
         | KeyCode::Char('D')
         | KeyCode::Char('i')
         | KeyCode::Char('I') => Action::ToggleAnalytics,
-        KeyCode::Char('t') | KeyCode::Char('T') => Action::CycleTheme,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::AddTime,
         KeyCode::Char('-') | KeyCode::Char('_') => Action::SubtractTime,
         KeyCode::Char('m') | KeyCode::Char('M') => Action::ToggleMinimal,
@@ -78,12 +93,36 @@ mod tests {
     }
 
     #[test]
+    fn phase_category_and_scroll_keys_map_to_actions() {
+        assert_eq!(
+            handle_key(key(KeyCode::Char('f'))),
+            Action::SelectPhase(TimerPhase::Focus)
+        );
+        assert_eq!(
+            handle_key(key(KeyCode::Char('F'))),
+            Action::SelectPhase(TimerPhase::Focus)
+        );
+        assert_eq!(handle_key(key(KeyCode::Char('b'))), Action::ToggleBreak);
+        assert_eq!(handle_key(key(KeyCode::Char('B'))), Action::ToggleBreak);
+        assert_eq!(
+            handle_key(key(KeyCode::Char('l'))),
+            Action::SelectPhase(TimerPhase::LongBreak)
+        );
+        assert_eq!(handle_key(key(KeyCode::Char('c'))), Action::CycleCategory);
+        assert_eq!(handle_key(key(KeyCode::Char('C'))), Action::CycleCategory);
+        assert_eq!(handle_key(key(KeyCode::BackTab)), Action::CycleCategory);
+        assert_eq!(handle_key(key(KeyCode::Up)), Action::ScrollUp);
+        assert_eq!(handle_key(key(KeyCode::Down)), Action::ScrollDown);
+        assert_eq!(handle_key(key(KeyCode::Char('k'))), Action::ScrollUp);
+        assert_eq!(handle_key(key(KeyCode::Char('j'))), Action::ScrollDown);
+    }
+
+    #[test]
     fn existing_bindings_are_unchanged() {
         assert_eq!(handle_key(key(KeyCode::Char(' '))), Action::TogglePause);
         assert_eq!(handle_key(key(KeyCode::Char('p'))), Action::TogglePause);
         assert_eq!(handle_key(key(KeyCode::Char('r'))), Action::Reset);
         assert_eq!(handle_key(key(KeyCode::Char('s'))), Action::Skip);
-        assert_eq!(handle_key(key(KeyCode::Char('t'))), Action::CycleTheme);
         assert_eq!(handle_key(key(KeyCode::Char('m'))), Action::ToggleMinimal);
         assert_eq!(handle_key(key(KeyCode::Char('+'))), Action::AddTime);
         assert_eq!(handle_key(key(KeyCode::Char('-'))), Action::SubtractTime);

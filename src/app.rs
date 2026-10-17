@@ -6,7 +6,7 @@ use crate::hyprland::StatusWriter;
 use crate::notification::NotificationManager;
 use crate::timer::mode::{build_modes, DEFAULT_MODE};
 use crate::timer::pomodoro::PhaseEvent;
-use crate::timer::{PomodoroMode, PomodoroTimer, SystemIdentity};
+use crate::timer::{FocusCategory, PomodoroMode, PomodoroTimer, SystemIdentity, TimerPhase};
 use crate::ui::{Theme, UiState};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,10 @@ pub struct App {
     pub mode_index: usize,
     /// A requested mode switch waiting for the user's yes/no.
     pub pending_mode: Option<usize>,
+    /// Optional category filter on the Analytics page (`None` = All categories).
+    pub analytics_filter: Option<FocusCategory>,
+    /// Scroll offset for the Analytics recent sessions log.
+    pub analytics_scroll: usize,
     /// Offline system username and computer hostname.
     pub system_identity: SystemIdentity,
     /// The celebration banner is shown until this instant.
@@ -61,6 +65,8 @@ impl App {
             modes,
             mode_index: DEFAULT_MODE,
             pending_mode: None,
+            analytics_filter: None,
+            analytics_scroll: 0,
             system_identity,
             celebration_until: None,
             notification_manager,
@@ -84,6 +90,8 @@ impl App {
             alarm_ringing: self.timer.alarm_ringing,
             alarm_flash: self.timer.alarm_ringing && self.alarm.flash_on(now),
             system_identity: &self.system_identity,
+            analytics_filter: self.analytics_filter,
+            analytics_scroll: self.analytics_scroll,
         }
     }
 
@@ -115,7 +123,6 @@ impl App {
             match action {
                 Action::ToggleHelp => self.toggle_help(),
                 Action::ToggleAnalytics => self.toggle_analytics(),
-                Action::CycleTheme => self.cycle_theme(),
                 Action::ToggleMinimal => self.toggle_minimal(),
                 _ => {}
             }
@@ -132,12 +139,20 @@ impl App {
         }
 
         // While the dedicated Analytics page is open, keep timer controls isolated
-        // so the Analytics page is completely separate from the Timer page.
+        // and route category-filter (`c` / `Tab`) and scroll (`j`/`k` / `Up`/`Down`)
+        // to the Analytics view.
         if self.show_analytics {
             match action {
                 Action::ToggleAnalytics | Action::Escape => self.show_analytics = false,
                 Action::ToggleHelp => self.toggle_help(),
-                Action::CycleTheme => self.cycle_theme(),
+                Action::CycleCategory | Action::CycleMode => self.cycle_analytics_filter(),
+                Action::ScrollUp => {
+                    self.analytics_scroll = self.analytics_scroll.saturating_sub(1);
+                }
+                Action::ScrollDown => {
+                    let max_scroll = self.timer.stats.recent_log.len().saturating_sub(1);
+                    self.analytics_scroll = (self.analytics_scroll + 1).min(max_scroll);
+                }
                 _ => {}
             }
             return;
@@ -148,15 +163,23 @@ impl App {
             Action::TogglePause => self.toggle_pause(),
             Action::Reset => self.reset(),
             Action::Skip => self.skip(),
+            Action::SelectPhase(phase) => self.select_phase(phase),
+            Action::ToggleBreak => self.toggle_break(),
+            Action::CycleCategory => self.cycle_category(),
             Action::ToggleHelp => self.toggle_help(),
             Action::ToggleAnalytics => self.toggle_analytics(),
-            Action::CycleTheme => self.cycle_theme(),
             Action::AddTime => self.add_time(),
             Action::SubtractTime => self.subtract_time(),
             Action::ToggleMinimal => self.toggle_minimal(),
             Action::SelectMode(index) => self.select_mode(index),
             Action::CycleMode => self.cycle_mode(),
-            Action::Quit | Action::StopAlarm | Action::Confirm | Action::Cancel | Action::None => {}
+            Action::Quit
+            | Action::StopAlarm
+            | Action::Confirm
+            | Action::Cancel
+            | Action::ScrollUp
+            | Action::ScrollDown
+            | Action::None => {}
         }
     }
 
@@ -179,6 +202,35 @@ impl App {
         let event = self.timer.skip();
         self.handle_phase_event(event, now);
         self.update_status();
+    }
+
+    pub fn select_phase(&mut self, phase: TimerPhase) {
+        self.sync();
+        self.timer.set_phase(phase);
+        self.update_status();
+    }
+
+    pub fn toggle_break(&mut self) {
+        self.sync();
+        self.timer.toggle_break_phase();
+        self.update_status();
+    }
+
+    pub fn cycle_category(&mut self) {
+        self.sync();
+        self.timer.cycle_category();
+        self.update_status();
+    }
+
+    /// Cycle the Analytics category filter: `All` -> `Coding` -> `Learning` -> `Reading` -> `All`.
+    pub fn cycle_analytics_filter(&mut self) {
+        self.analytics_filter = match self.analytics_filter {
+            None => Some(FocusCategory::Coding),
+            Some(FocusCategory::Coding) => Some(FocusCategory::Learning),
+            Some(FocusCategory::Learning) => Some(FocusCategory::Reading),
+            Some(FocusCategory::Reading) => None,
+        };
+        self.analytics_scroll = 0;
     }
 
     /// Advance the timer to `now`. Called every frame; the countdown is based
@@ -221,12 +273,6 @@ impl App {
 
     // ── Mode switching ───────────────────────────────────────────────────────
 
-    /// Request a switch to mode `index`.
-    ///
-    /// * Out-of-range index or the mode that is already active: ignored.
-    /// * Timer idle (nothing to lose): switches immediately.
-    /// * Timer running or part-way through a phase: nothing changes yet; a
-    ///   confirmation dialog is shown and the user decides.
     pub fn select_mode(&mut self, index: usize) {
         if index >= self.modes.len() || index == self.mode_index {
             return;
@@ -278,38 +324,26 @@ impl App {
         self.minimal_mode = !self.minimal_mode;
     }
 
-    pub fn cycle_theme(&mut self) {
-        self.theme = self.theme.cycle_next();
-    }
-
     pub fn quit(&mut self) {
         self.running = false;
     }
 
     // ── Private ──────────────────────────────────────────────────────────────
 
-    /// Bring the timer up to date before acting on user input, so pause /
-    /// reset / mode changes always act on the true remaining time.
     fn sync(&mut self) -> Instant {
         let now = Instant::now();
         self.tick(now);
         now
     }
 
-    /// A phase just reached 00:00: notify and start the alarm. The timer stays
-    /// at 00:00 until the user stops the alarm.
     fn start_alarm(&mut self, event: PhaseEvent, now: Instant) {
         self.notification_manager.send_phase_complete(event);
-        // A pending mode-switch dialog would be meaningless now.
         self.pending_mode = None;
         self.alarm.start(now);
     }
 
-    /// A phase was skipped: notify and show the cycle banner if it completed one.
     fn handle_phase_event(&mut self, event: PhaseEvent, now: Instant) {
         self.notification_manager.send_phase_complete(event);
-
-        // If a full cycle just completed, trigger the celebration banner.
         if self.timer.cycle_just_completed {
             self.celebration_until = Some(now + CELEBRATION_DURATION);
         }
@@ -325,8 +359,6 @@ mod tests {
     use super::*;
     use crate::config::settings::Settings;
 
-    /// App with notifications and the status file switched off, so tests have
-    /// no desktop or filesystem side effects.
     fn app() -> App {
         let mut settings = Settings::default();
         settings.notifications.enabled = false;
@@ -344,10 +376,38 @@ mod tests {
         let app = app();
         assert_eq!(app.mode_index, 0);
         assert_eq!(app.timer.mode.name, "Classic");
+        assert_eq!(app.timer.category, FocusCategory::Coding);
         assert_eq!(remaining_mins(&app), 25);
         assert!(!app.timer.is_running());
         assert!(app.pending_mode.is_none());
         assert!(!app.show_analytics);
+        assert!(app.analytics_filter.is_none());
+    }
+
+    #[test]
+    fn phase_selection_and_category_cycling_work_on_timer_page() {
+        let mut app = app();
+        assert_eq!(app.timer.current_phase(), TimerPhase::Focus);
+        assert_eq!(app.timer.category, FocusCategory::Coding);
+
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.timer.category, FocusCategory::Learning);
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.timer.category, FocusCategory::Reading);
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.timer.category, FocusCategory::Coding);
+
+        app.handle_action(Action::ToggleBreak);
+        assert_eq!(app.timer.current_phase(), TimerPhase::ShortBreak);
+        assert_eq!(remaining_mins(&app), 5);
+
+        app.handle_action(Action::ToggleBreak);
+        assert_eq!(app.timer.current_phase(), TimerPhase::LongBreak);
+        assert_eq!(remaining_mins(&app), 15);
+
+        app.handle_action(Action::SelectPhase(TimerPhase::Focus));
+        assert_eq!(app.timer.current_phase(), TimerPhase::Focus);
+        assert_eq!(remaining_mins(&app), 25);
     }
 
     #[test]
@@ -359,13 +419,23 @@ mod tests {
         // Timer keys while on Analytics page do not start or modify the timer
         app.handle_action(Action::TogglePause);
         app.handle_action(Action::SelectMode(2));
+        app.handle_action(Action::ToggleBreak);
         assert!(!app.timer.is_running());
         assert_eq!(app.mode_index, 0);
+        assert_eq!(app.timer.current_phase(), TimerPhase::Focus);
+        assert_eq!(app.timer.category, FocusCategory::Coding);
 
-        // Theme cycling still works on the Analytics page
-        let initial_theme = app.theme.name;
-        app.handle_action(Action::CycleTheme);
-        assert_ne!(app.theme.name, initial_theme);
+        // CycleCategory on the Analytics page cycles the analytics_filter (All -> Coding -> Learning -> Reading -> All)
+        assert_eq!(app.analytics_filter, None);
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.analytics_filter, Some(FocusCategory::Coding));
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.analytics_filter, Some(FocusCategory::Learning));
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.analytics_filter, Some(FocusCategory::Reading));
+        app.handle_action(Action::CycleCategory);
+        assert_eq!(app.analytics_filter, None);
+        assert_eq!(app.timer.category, FocusCategory::Coding);
 
         // Pressing ToggleAnalytics again closes the Analytics page
         app.handle_action(Action::ToggleAnalytics);
@@ -483,8 +553,9 @@ mod tests {
             Action::TogglePause,
             Action::Reset,
             Action::Skip,
+            Action::ToggleBreak,
+            Action::CycleCategory,
             Action::AddTime,
-            Action::CycleTheme,
             Action::ToggleMinimal,
             Action::ToggleHelp,
             Action::ToggleAnalytics,
@@ -558,7 +629,6 @@ mod tests {
 
     // ── Alarm ────────────────────────────────────────────────────────────────
 
-    /// Run the current phase down to 00:00 and let the alarm start.
     fn ring_alarm(app: &mut App) {
         app.handle_action(Action::TogglePause); // start
         app.timer.current_timer.remaining = Duration::from_millis(10);
@@ -603,6 +673,8 @@ mod tests {
             Action::TogglePause,
             Action::Reset,
             Action::Skip,
+            Action::ToggleBreak,
+            Action::CycleCategory,
             Action::AddTime,
             Action::SubtractTime,
             Action::SelectMode(1),
@@ -616,7 +688,6 @@ mod tests {
         assert!(app.timer.alarm_ringing, "still ringing");
         assert_eq!(app.timer.current_timer.format_time(), "00:00");
 
-        app.handle_action(Action::CycleTheme);
         app.handle_action(Action::ToggleMinimal);
         assert!(app.minimal_mode);
         assert!(app.timer.alarm_ringing);
@@ -631,7 +702,6 @@ mod tests {
         ring_alarm(&mut app);
         app.handle_action(Action::StopAlarm);
         assert!(!app.timer.alarm_ringing);
-        // Time passing afterwards must never bring the alarm back.
         app.tick(Instant::now() + Duration::from_secs(30));
         assert!(!app.timer.alarm_ringing);
         assert!(!app.view(Instant::now()).alarm_ringing);
