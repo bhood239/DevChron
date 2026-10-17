@@ -1,10 +1,10 @@
-# Maintainer: Ben Hood <benhood97@btinternet.com>
+# Maintainer: Atharva Pawar <https://github.com/Atharvapawar007>
 pkgname=devchron
 pkgver=0.1.1
 pkgrel=1
-pkgdesc="A stunning TUI Pomodoro timer for Hyprland/Wayland"
+pkgdesc="A stunning TUI Pomodoro timer and offline focus analytics suite for Hyprland/Wayland"
 arch=('x86_64')
-url="https://github.com/bhood239/DevChron"
+url="https://github.com/Atharvapawar007/DevChron"
 license=('MIT')
 depends=('dbus')
 makedepends=('rust' 'cargo')
@@ -13,7 +13,7 @@ optdepends=(
     'jq: JSON parsing for status bar scripts'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('5707e59a00f4bfafb8a70a8a47fa22a221d01d9b0125d81cb51752cd724b516a')
+sha256sums=('SKIP')
 
 build() {
     cd "DevChron-$pkgver"

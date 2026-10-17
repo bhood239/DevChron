@@ -4,7 +4,7 @@ use super::theme::{blend_linear, Theme};
 use crate::timer::session::{
     category_index, AnalyticsSummary, SessionStats, SystemIdentity, GRID_DAYS_PER_WEEK,
 };
-use crate::timer::{FocusCategory, PomodoroMode, PomodoroTimer, TimerPhase};
+use crate::timer::{CycleReward, FocusCategory, PomodoroMode, PomodoroTimer, TimerPhase};
 use chrono::{Datelike, Local, Timelike};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -27,6 +27,12 @@ pub struct UiState<'a> {
     pub mode_index: usize,
     /// A mode switch that is waiting for the user's confirmation.
     pub pending_mode: Option<usize>,
+    /// Full-cycle reward awaiting acknowledgment before the final long break begins.
+    pub reward: Option<&'a CycleReward>,
+    /// Normalized reveal animation progress (`0.0..=1.0`) for the reward modal.
+    pub reward_anim_progress: f64,
+    /// Milliseconds elapsed since the reward was unlocked.
+    pub reward_elapsed_ms: u64,
     /// The phase reached 00:00 and the alarm is ringing.
     pub alarm_ringing: bool,
     /// Flashes on/off (twice a second) while the alarm rings.
@@ -239,6 +245,10 @@ pub fn render(f: &mut Frame, ui: &UiState) {
         render_full(f, size, ui);
     }
 
+    if let Some(reward) = ui.reward {
+        render_reward(f, size, ui, reward);
+    }
+
     if let Some(idx) = ui.pending_mode {
         if let Some(mode) = ui.modes.get(idx) {
             render_confirm(f, size, ui, mode);
@@ -307,6 +317,13 @@ fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
         row1_spans.push(Span::styled(" · ", style::label(theme)));
         row1_spans.push(Span::styled("c ", style::keycap(theme.gold)));
         row1_spans.push(Span::styled(timer.category.label(), style::accent_bold(cat_col)));
+    } else if ui.reward.is_some() {
+        row1_spans.push(Span::styled(
+            "  ✦ CYCLE COMPLETE",
+            Style::default()
+                .fg(theme.today_color())
+                .add_modifier(Modifier::BOLD),
+        ));
     } else if timer.alarm_ringing {
         row1_spans.push(Span::styled(
             "  ALARM",
@@ -347,7 +364,7 @@ fn render_header(f: &mut Frame, area: Rect, ui: &UiState) {
     let mut row2 = mode_tabs(ui, active_mode_col);
     let session_text = format!(
         "{:02}/{:02}",
-        timer.cycle_count + 1,
+        timer.display_cycle_number(),
         timer.cycles_before_long_break
     );
     let left_width = row2.width();
@@ -538,6 +555,13 @@ fn digit_color(ui: &UiState) -> Color {
 }
 
 fn ring_colors(ui: &UiState) -> (Color, Color) {
+    if ui.reward.is_some() {
+        let p = ui.reward_anim_progress.clamp(0.0, 1.0);
+        let cat_col = ui.theme.category_color(ui.timer.category);
+        let from = blend_linear(cat_col, ui.theme.today_color(), p);
+        let to = blend_linear(ui.theme.emerald, ui.theme.gold, p);
+        return (from, to);
+    }
     let (mut from, mut to) = ui
         .theme
         .active_timer_gradient(ui.timer.current_timer.phase, ui.timer.category);
@@ -801,6 +825,34 @@ fn render_controls(f: &mut Frame, area: Rect, timer: &PomodoroTimer, theme: &The
 
     let desc = |d: &'static str| Span::styled(format!(" {d}"), style::label(theme));
     let sep = || Span::raw("   ");
+
+    if timer.is_reward_pending() {
+        let mut spans = vec![
+            Span::styled("enter/space", style::keycap(theme.emerald)),
+            Span::styled(" Start long break", style::accent_bold(theme.gold)),
+            sep(),
+        ];
+        if timer.alarm_ringing {
+            spans.push(Span::styled("a", style::keycap(theme.amber)));
+            spans.push(desc("mute"));
+            spans.push(sep());
+        }
+        spans.extend([
+            Span::styled("r", style::keycap(theme.rose)),
+            desc("reset"),
+            sep(),
+            Span::styled("g", style::keycap(theme.long_break_color)),
+            desc("analytics"),
+            sep(),
+            Span::styled("q", style::keycap(theme.rose)),
+            desc("quit"),
+        ]);
+        f.render_widget(
+            Paragraph::new(vec![Line::from(spans)]).alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
 
     if timer.alarm_ringing {
         let lines = vec![Line::from(vec![
@@ -2841,14 +2893,33 @@ fn render_minimal(f: &mut Frame, size: Rect, ui: &UiState) {
     f.render_widget(phase_line, chunks[1]);
 }
 
-// ─── Mode-switch confirmation ────────────────────────────────────────────────
+// ─── Animated Full-Cycle Reward Modal ────────────────────────────────────────
 
-fn render_confirm(f: &mut Frame, area: Rect, ui: &UiState, target: &PomodoroMode) {
+fn render_reward(f: &mut Frame, area: Rect, ui: &UiState, reward: &CycleReward) {
     let theme = ui.theme;
-    let accent = get_phase_color(ui.timer.current_timer.phase, theme);
+    let p = ui.reward_anim_progress.clamp(0.0, 1.0);
+    let shimmer_idx = ((ui.reward_elapsed_ms / 250) % 4) as usize;
+    const SPARKS: [&str; 4] = ["✦", "★", "◈", "✦"];
+    let spark = SPARKS[shimmer_idx];
 
-    let width = area.width.saturating_sub(4).min(52);
-    let height = 7u16.min(area.height);
+    let cat_col = theme.category_color(reward.final_category);
+    let border_col = if p < 0.5 {
+        blend_linear(cat_col, theme.emerald, p * 2.0)
+    } else {
+        blend_linear(theme.emerald, theme.today_color(), (p - 0.5) * 2.0)
+    };
+
+    let max_w = area.width.saturating_sub(4).min(68);
+    let min_w = max_w.min(58);
+    let anim_w = (min_w as f64 + (max_w.saturating_sub(min_w) as f64) * p).round() as u16;
+    let width = anim_w.clamp(min_w, max_w);
+
+    let compact = area.height < 21 || width < 58;
+    let height = if compact {
+        9u16.min(area.height.saturating_sub(2)).max(7)
+    } else {
+        14u16.min(area.height.saturating_sub(2))
+    };
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -2856,31 +2927,317 @@ fn render_confirm(f: &mut Frame, area: Rect, ui: &UiState, target: &PomodoroMode
         height,
     };
 
-    let consequence = "This phase restarts at the new length, paused.";
-    let key = |k: &'static str| Span::styled(k, style::keycap(accent));
+    // Build animated cycle-completion nodes (e.g. ✓ Cycle 1 ── ✓ Cycle 2 ...)
+    let mut cycle_spans: Vec<Span<'static>> = Vec::new();
+    let total_cycles = reward.cycles_completed.max(1);
+    for idx in 0..total_cycles {
+        if idx > 0 {
+            cycle_spans.push(Span::styled(" ── ", style::rule_style(theme)));
+        }
+        let c_cat = ui
+            .timer
+            .cycle_categories
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(reward.final_category);
+        let c_col = theme.category_color(c_cat);
+        let threshold = (idx as f64) / (total_cycles as f64);
+        let revealed = p >= threshold;
+        let badge_col = if revealed { theme.emerald } else { theme.dim };
+        cycle_spans.push(Span::styled("✓ ", style::accent_bold(badge_col)));
+        cycle_spans.push(Span::styled(
+            format!("Cycle {}", idx + 1),
+            style::accent_bold(c_col),
+        ));
+    }
 
-    let text = vec![
-        Line::from(vec![
-            Span::styled("Switch to ", style::body(theme)),
+    let earned_str = format!(
+        "+{} min ({})",
+        reward.total_focus_mins,
+        SessionStats::format_duration_secs(reward.total_focus_mins * 60)
+    );
+    let today_str = SessionStats::format_duration_secs(reward.today_focus_secs);
+    let cats_str = reward.categories_summary();
+
+    let mut cat_spans: Vec<Span<'static>> = vec![Span::styled("Categories: ", style::label(theme))];
+    for (i, &cat) in reward.categories_used.iter().enumerate() {
+        if i > 0 {
+            cat_spans.push(Span::styled(" · ", style::label(theme)));
+        }
+        let cc = theme.category_color(cat);
+        cat_spans.push(Span::styled(format!("● {}", cat.label()), style::accent_bold(cc)));
+    }
+    if reward.categories_used.is_empty() {
+        cat_spans.push(Span::styled(cats_str.clone(), style::accent_bold(cat_col)));
+    }
+
+    let motivation = match reward.mode_name {
+        "Session" => format!(
+            "3 deep-work cycles complete — enjoy your {}m break.",
+            reward.long_break_mins
+        ),
+        "Extended" => format!(
+            "2 endurance cycles complete — enjoy your {}m break.",
+            reward.long_break_mins
+        ),
+        _ => format!(
+            "{} focus cycles complete — enjoy your {}m break.",
+            reward.cycles_completed, reward.long_break_mins
+        ),
+    };
+
+    let crest_arms = ((p * 6.0).round() as usize).clamp(1, 6);
+    let crest_bar = "━".repeat(crest_arms);
+
+    let text = if compact {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{spark} "), style::accent_bold(theme.today_color())),
+                Span::styled(
+                    format!(
+                        "{} Mode Complete ({}/{} cycles)",
+                        reward.mode_name, reward.cycles_completed, reward.cycles_completed
+                    ),
+                    style::accent_bold(theme.gold),
+                ),
+                Span::styled(format!(" {spark}"), style::accent_bold(theme.today_color())),
+            ]),
+            Line::from(vec![
+                Span::styled("Earned: ", style::label(theme)),
+                Span::styled(earned_str, style::accent_bold(theme.emerald)),
+                Span::styled(" · ", style::label(theme)),
+                Span::styled(cats_str, style::accent_bold(cat_col)),
+            ]),
+            Line::from(vec![
+                Span::styled("Today: ", style::label(theme)),
+                Span::styled(today_str, style::value_bold(theme)),
+                Span::styled(
+                    format!(" ({} sess)", reward.today_sessions),
+                    style::label(theme),
+                ),
+                Span::styled(
+                    format!("  ·  Streak {}d", reward.current_streak),
+                    style::accent_bold(theme.gold),
+                ),
+            ]),
+            Line::from(Span::styled(motivation, style::label(theme))),
+            Line::from(vec![
+                Span::styled("[Enter / Space]", style::keycap(theme.emerald)),
+                Span::styled(
+                    format!(" Start {}m Break   ", reward.long_break_mins),
+                    style::body(theme),
+                ),
+                Span::styled("[R]", style::keycap(theme.rose)),
+                Span::styled(" Reset", style::label(theme)),
+            ]),
+        ];
+        if rect.height <= 6 {
+            lines.remove(3);
+        }
+        lines
+    } else {
+        let mut streak_spans = vec![
+            Span::styled("Today: ", style::label(theme)),
+            Span::styled(today_str, style::value_bold(theme)),
             Span::styled(
-                format!("{} ({} min)", target.name, target.summary()),
-                style::accent_bold(accent),
+                format!(" ({} sess)", reward.today_sessions),
+                style::label(theme),
             ),
-            Span::styled("?", style::body(theme)),
-        ]),
-        Line::from(Span::styled(consequence, style::label(theme))),
-        Line::from(""),
-        Line::from(vec![
-            key("[Y / Enter]"),
-            Span::styled(" Switch    ", style::label(theme)),
-            key("[N / Esc]"),
-            Span::styled(" Keep current", style::label(theme)),
-        ]),
-    ];
+            Span::styled(" · Streak: ", style::label(theme)),
+            Span::styled(
+                format!("{}d", reward.current_streak),
+                style::accent_bold(theme.gold),
+            ),
+            Span::styled(
+                format!(" · Cycle #{}", reward.all_time_cycles),
+                style::accent_bold(theme.cyan),
+            ),
+        ];
+        if reward.is_new_daily_peak {
+            streak_spans.push(Span::styled(
+                " ★ Peak",
+                style::accent_bold(theme.today_color()),
+            ));
+        }
+
+        let mut action_spans = vec![
+            Span::styled("[Enter / Space]", style::keycap(theme.emerald)),
+            Span::styled(
+                format!(" Start {}m Break   ", reward.long_break_mins),
+                style::value_bold(theme),
+            ),
+        ];
+        if ui.alarm_ringing {
+            action_spans.push(Span::styled("[A]", style::keycap(theme.gold)));
+            action_spans.push(Span::styled(" Mute   ", style::label(theme)));
+        }
+        action_spans.push(Span::styled("[R]", style::keycap(theme.rose)));
+        action_spans.push(Span::styled(" Reset", style::label(theme)));
+
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{spark} {crest_bar}  "),
+                    style::accent_bold(theme.today_color()),
+                ),
+                Span::styled(
+                    "FULL FOCUS CYCLE COMPLETE",
+                    style::accent_bold(theme.gold),
+                ),
+                Span::styled(
+                    format!("  {crest_bar} {spark}"),
+                    style::accent_bold(theme.today_color()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} Mode", reward.mode_name),
+                    style::accent_bold(theme.mode_name_color(reward.mode_name)),
+                ),
+                Span::styled("  ·  ", style::label(theme)),
+                Span::styled(
+                    format!(
+                        "{} of {} focus cycles completed",
+                        reward.cycles_completed, reward.cycles_completed
+                    ),
+                    style::accent_bold(theme.emerald),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(cycle_spans),
+            Line::from(vec![
+                Span::styled("Focus earned: ", style::label(theme)),
+                Span::styled(earned_str, style::accent_bold(theme.gold)),
+                Span::styled("  ·  ", style::label(theme)),
+                Span::styled(
+                    format!("Next: {}m Break", reward.long_break_mins),
+                    style::accent_bold(theme.long_break_color),
+                ),
+            ]),
+            Line::from(cat_spans),
+            Line::from(streak_spans),
+            Line::from(Span::styled(motivation, style::label(theme))),
+            Line::from(""),
+            Line::from(action_spans),
+        ]
+    };
 
     f.render_widget(Clear, rect);
     let dialog = Paragraph::new(text)
-        .block(style::dialog_block("Switch mode", accent))
+        .block(style::dialog_block("Cycle Complete · Reward Unlocked", border_col))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    f.render_widget(dialog, rect);
+}
+
+// ─── Mode-switch confirmation ────────────────────────────────────────────────
+
+fn render_confirm(f: &mut Frame, area: Rect, ui: &UiState, target: &PomodoroMode) {
+    let theme = ui.theme;
+    let accent = theme.amber;
+    let target_col = theme.mode_name_color(target.name);
+
+    let width = area.width.saturating_sub(4).min(66);
+    let compact = area.height < 20 || width < 56;
+    let height = if compact {
+        8u16.min(area.height.saturating_sub(2)).max(6)
+    } else {
+        11u16.min(area.height.saturating_sub(2))
+    };
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let done_cycles = ui.timer.completed_cycles_in_sequence();
+    let total_cycles = ui.timer.cycles_before_long_break;
+    let current_mode = ui.timer.mode.name;
+    let progress_line = format!(
+        "You have completed {} of {} focus cycles in {} mode.",
+        done_cycles, total_cycles, current_mode
+    );
+
+    let state_detail = if ui.timer.is_reward_pending() {
+        "Full-cycle reward is awaiting acknowledgment and will be dismissed.".to_string()
+    } else if ui.timer.is_running() {
+        format!(
+            "Active {} session is running and will be interrupted.",
+            ui.timer.current_timer.phase.label()
+        )
+    } else if ui.timer.current_timer.has_progress() {
+        format!(
+            "Paused {} session has unfinished progress that will be discarded.",
+            ui.timer.current_timer.phase.label()
+        )
+    } else {
+        format!(
+            "Unfinished cycle sequence in {} mode will be abandoned.",
+            current_mode
+        )
+    };
+
+    let preservation_line = format!(
+        "Switching to {} mode ({} cycles) resets cycle progression. Recorded focus sessions in your statistics are preserved.",
+        target.name, target.focus_cycles
+    );
+
+    let key_confirm = |k: &'static str| Span::styled(k, style::keycap(theme.emerald));
+    let key_cancel = |k: &'static str| Span::styled(k, style::keycap(theme.rose));
+
+    let text = if compact {
+        vec![
+            Line::from(vec![
+                Span::styled("Switch to ", style::body(theme)),
+                Span::styled(
+                    format!("{} ({} min)", target.name, target.summary()),
+                    style::accent_bold(target_col),
+                ),
+                Span::styled("?", style::body(theme)),
+            ]),
+            Line::from(Span::styled(progress_line, style::accent_bold(theme.gold))),
+            Line::from(Span::styled(
+                "Resets cycle progression; recorded statistics are preserved.",
+                style::label(theme),
+            )),
+            Line::from(vec![
+                key_confirm("[Y / Enter]"),
+                Span::styled(" Confirm switch   ", style::body(theme)),
+                key_cancel("[N / Esc]"),
+                Span::styled(" Cancel", style::label(theme)),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled("Switch to ", style::body(theme)),
+                Span::styled(
+                    format!("{} ({} min)", target.name, target.summary()),
+                    style::accent_bold(target_col),
+                ),
+                Span::styled(
+                    format!(" · {} focus cycles?", target.focus_cycles),
+                    style::body(theme),
+                ),
+            ]),
+            Line::from(Span::styled(progress_line, style::accent_bold(theme.gold))),
+            Line::from(Span::styled(state_detail, Style::default().fg(theme.rose))),
+            Line::from(""),
+            Line::from(Span::styled(preservation_line, style::label(theme))),
+            Line::from(""),
+            Line::from(vec![
+                key_confirm("[Y / Enter]"),
+                Span::styled(" Confirm switch    ", style::value_bold(theme)),
+                key_cancel("[N / Esc]"),
+                Span::styled(" Cancel and continue", style::label(theme)),
+            ]),
+        ]
+    };
+
+    f.render_widget(Clear, rect);
+    let dialog = Paragraph::new(text)
+        .block(style::dialog_block("Switch focus mode?", accent))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     f.render_widget(dialog, rect);
@@ -3012,9 +3369,13 @@ pub(crate) mod tests {
         progress: f64,
         running: bool,
     ) -> PomodoroTimer {
-        let mut t = PomodoroTimer::with_stats(MODES[mode], 4, SessionStats::in_memory());
-        while t.current_phase() != phase {
-            t.skip();
+        let mut t = PomodoroTimer::with_stats(
+            MODES[mode],
+            MODES[mode].focus_cycles,
+            SessionStats::in_memory(),
+        );
+        if t.current_phase() != phase {
+            t.set_phase(phase);
         }
         let dur = t.current_timer.duration;
         t.current_timer.remaining = dur.mul_f64(1.0 - progress);
@@ -3061,6 +3422,9 @@ pub(crate) mod tests {
             modes: MODES,
             mode_index,
             pending_mode: pending,
+            reward: timer.reward.as_ref(),
+            reward_anim_progress: 1.0,
+            reward_elapsed_ms: 1200,
             alarm_ringing: timer.alarm_ringing,
             alarm_flash: false,
             system_identity: &identity,
@@ -3372,15 +3736,61 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn confirm_dialog_names_the_target_mode_and_both_choices() {
+    fn confirm_dialog_names_the_target_mode_progress_and_both_choices() {
         let theme = Theme::default_theme();
-        let t = make_timer(0, TimerPhase::Focus, 0.3, true);
+        let mut t = make_timer(0, TimerPhase::Focus, 0.3, true);
+        t.cycle_count = 2;
         let screen = text(&draw(80, 24, &t, &theme, 0, Some(2), false, false));
-        assert!(screen.contains("Switch to Extended (75/15/45 min)?"));
-        assert!(screen.contains("[Y / Enter]"));
-        assert!(screen.contains("[N / Esc]"));
-        let screen = text(&draw(80, 24, &t, &theme, 0, None, false, false));
-        assert!(!screen.contains("Switch to"));
+        assert!(screen.contains("Switch to Extended (75/15/45 min)"), "{screen}");
+        assert!(
+            screen.contains("You have completed 2 of 4 focus cycles in Classic mode."),
+            "{screen}"
+        );
+        assert!(screen.contains("statistics are preserved"), "{screen}");
+        assert!(screen.contains("[Y / Enter]"), "{screen}");
+        assert!(screen.contains("[N / Esc]"), "{screen}");
+
+        // Also fits cleanly at minimum supported terminal size (60x16)
+        let min_screen = text(&draw(60, 16, &t, &theme, 0, Some(1), false, false));
+        assert!(min_screen.contains("Switch to Session (50/10/30 min)?"), "{min_screen}");
+        assert!(min_screen.contains("2 of 4 focus cycles"), "{min_screen}");
+        assert!(min_screen.contains("[Y / Enter]"), "{min_screen}");
+        assert!(min_screen.contains("[N / Esc]"), "{min_screen}");
+
+        let idle_screen = text(&draw(80, 24, &t, &theme, 0, None, false, false));
+        assert!(!idle_screen.contains("Switch focus mode?"));
+    }
+
+    #[test]
+    fn full_cycle_reward_modal_renders_at_all_sizes_and_animation_stages() {
+        let theme = Theme::default_theme();
+        let mut t = make_timer(2, TimerPhase::Focus, 0.0, false); // Extended (2 cycles, 150m)
+        let mut now = Instant::now();
+        t.toggle_at(now);
+        now += Duration::from_secs(75 * 60);
+        t.tick_at(now);
+        t.dismiss_alarm();
+        t.toggle_at(now);
+        now += Duration::from_secs(15 * 60);
+        t.tick_at(now);
+        t.dismiss_alarm();
+        t.cycle_category(); // Learning
+        t.toggle_at(now);
+        now += Duration::from_secs(75 * 60);
+        t.tick_at(now);
+        assert!(t.is_reward_pending());
+
+        for &(w, h) in &[(60u16, 16u16), (80, 24), (100, 30), (160, 42)] {
+            let screen = text(&draw(w, h, &t, &theme, 2, None, false, false));
+            assert!(screen.contains("Extended"), "{w}x{h}:
+{screen}");
+            assert!(screen.contains("150"), "{w}x{h} total focus mins missing:
+{screen}");
+            assert!(screen.contains("45m"), "{w}x{h} long break mins missing:
+{screen}");
+            assert!(screen.contains("[Enter / Space]"), "{w}x{h} action prompt missing:
+{screen}");
+        }
     }
 
     #[test]
@@ -3544,6 +3954,9 @@ pub(crate) mod tests {
                 modes: MODES,
                 mode_index: 0,
                 pending_mode: None,
+                reward: t.reward.as_ref(),
+                reward_anim_progress: 1.0,
+                reward_elapsed_ms: 1200,
                 alarm_ringing: true,
                 alarm_flash: flash,
                 system_identity: &identity,

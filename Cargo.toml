@@ -2,10 +2,10 @@
 name = "devchron"
 version = "0.1.0"
 edition = "2021"
-authors = ["Ben Hood <bhood239@gmail.com>"]
-description = "A stunning TUI Pomodoro timer for Hyprland/Wayland"
+authors = ["Atharva Pawar <https://github.com/Atharvapawar007>"]
+description = "A stunning TUI Pomodoro timer and offline focus analytics suite for Hyprland/Wayland"
 license = "MIT"
-repository = "https://github.com/bhood239/DevChron"
+repository = "https://github.com/Atharvapawar007/DevChron"
 keywords = ["pomodoro", "timer", "tui", "productivity"]
 categories = ["command-line-utilities"]
 

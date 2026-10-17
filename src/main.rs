@@ -62,7 +62,10 @@ fn run_app<B: ratatui::backend::Backend>(
     // What the last frame showed. The ring moves far less than one dot per
     // second, so repainting when the displayed second changes keeps it exact
     // while idling at ~0 % CPU instead of repainting 20 times a second.
-    let mut last_drawn: Option<(u64, bool, Option<bool>)> = None;
+    // While the full-cycle reward reveal animation is active (first 1.2s),
+    // `reward_step` ticks every 50ms for a smooth 20 FPS reveal, then slows to
+    // a gentle 250ms shimmer.
+    let mut last_drawn: Option<(u64, bool, Option<bool>, Option<u64>)> = None;
     let mut dirty = true;
 
     loop {
@@ -70,11 +73,19 @@ fn run_app<B: ratatui::backend::Backend>(
         app.tick(now);
 
         let view = app.view(now);
+        let reward_step = view.reward.map(|_| {
+            if view.reward_elapsed_ms <= 1200 {
+                view.reward_elapsed_ms / 50
+            } else {
+                24 + (view.reward_elapsed_ms / 250)
+            }
+        });
         let shown = (
             app.timer.current_timer.remaining_secs_ceil(),
             view.celebrating,
             // Repaint when the alarm flash toggles (twice a second).
             view.alarm_ringing.then_some(view.alarm_flash),
+            reward_step,
         );
         if dirty || last_drawn != Some(shown) {
             terminal.draw(|f| ui::render(f, &app.view(now)))?;

@@ -639,62 +639,70 @@ impl SessionStats {
         category_name: &str,
         reached_zero: bool,
     ) {
-        self.sessions_completed += 1;
-        self.today_sessions += 1;
-        self.total_focus_time += duration;
-        self.today_focus_time += duration;
+        if duration.is_zero() && !reached_zero {
+            return;
+        }
 
         let secs = duration.as_secs();
-        let key = Self::format_date(date);
-        let entry = self.history.entry(key).or_default();
-        entry.focus_secs = entry.focus_secs.saturating_add(secs);
-        entry.add_category_secs(category_name, secs);
+        if reached_zero {
+            self.sessions_completed += 1;
+            self.today_sessions += 1;
+            self.total_focus_time += duration;
+            self.today_focus_time += duration;
 
-        if duration > Duration::ZERO {
-            entry.sessions = entry.sessions.saturating_add(1);
-            let h = hour % 24;
-            self.hourly_focus_secs[h] = self.hourly_focus_secs[h].saturating_add(secs);
-            let c_idx = category_index(category_name);
-            self.hourly_cat_secs[h][c_idx] = self.hourly_cat_secs[h][c_idx].saturating_add(secs);
+            let key = Self::format_date(date);
+            let entry = self.history.entry(key).or_default();
+            entry.focus_secs = entry.focus_secs.saturating_add(secs);
+            entry.add_category_secs(category_name, secs);
 
-            *self
-                .mode_focus_secs
-                .entry(mode_name.to_string())
-                .or_insert(0) += secs;
-            *self
-                .mode_sessions
-                .entry(mode_name.to_string())
-                .or_insert(0) += 1;
-            *self
-                .category_focus_secs
-                .entry(category_name.to_string())
-                .or_insert(0) += secs;
-            *self
-                .category_sessions
-                .entry(category_name.to_string())
-                .or_insert(0) += 1;
+            if duration > Duration::ZERO {
+                entry.sessions = entry.sessions.saturating_add(1);
+                let h = hour % 24;
+                self.hourly_focus_secs[h] = self.hourly_focus_secs[h].saturating_add(secs);
+                let c_idx = category_index(category_name);
+                self.hourly_cat_secs[h][c_idx] =
+                    self.hourly_cat_secs[h][c_idx].saturating_add(secs);
 
-            if reached_zero {
-                self.completed_focus_count = self.completed_focus_count.saturating_add(1);
-            } else {
-                self.interrupted_focus_count = self.interrupted_focus_count.saturating_add(1);
                 *self
-                    .category_interrupted
+                    .mode_focus_secs
+                    .entry(mode_name.to_string())
+                    .or_insert(0) += secs;
+                *self
+                    .mode_sessions
+                    .entry(mode_name.to_string())
+                    .or_insert(0) += 1;
+                *self
+                    .category_focus_secs
+                    .entry(category_name.to_string())
+                    .or_insert(0) += secs;
+                *self
+                    .category_sessions
                     .entry(category_name.to_string())
                     .or_insert(0) += 1;
-            }
+                self.completed_focus_count = self.completed_focus_count.saturating_add(1);
 
+                self.push_log(FlightLogEntry {
+                    timestamp: Self::now_timestamp(),
+                    phase: "FOCUS".to_string(),
+                    mode: mode_name.to_string(),
+                    category: category_name.to_string(),
+                    duration_secs: secs,
+                    status: "COMPLETE".to_string(),
+                });
+            }
+        } else if duration > Duration::ZERO {
+            self.interrupted_focus_count = self.interrupted_focus_count.saturating_add(1);
+            *self
+                .category_interrupted
+                .entry(category_name.to_string())
+                .or_insert(0) += 1;
             self.push_log(FlightLogEntry {
                 timestamp: Self::now_timestamp(),
                 phase: "FOCUS".to_string(),
                 mode: mode_name.to_string(),
                 category: category_name.to_string(),
                 duration_secs: secs,
-                status: if reached_zero {
-                    "COMPLETE".to_string()
-                } else {
-                    "SKIPPED".to_string()
-                },
+                status: "SKIPPED".to_string(),
             });
         }
 

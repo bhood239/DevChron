@@ -42,12 +42,14 @@ pub struct App {
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         let timer_settings = &config.settings.timer;
-        let modes = build_modes(
+        let mut modes = build_modes(
             timer_settings.focus_duration,
             timer_settings.short_break_duration,
             timer_settings.long_break_duration,
         );
-        let timer = PomodoroTimer::new(modes[DEFAULT_MODE], timer_settings.cycles_before_long_break);
+        modes[DEFAULT_MODE] =
+            modes[DEFAULT_MODE].with_cycles(timer_settings.cycles_before_long_break);
+        let timer = PomodoroTimer::new(modes[DEFAULT_MODE], modes[DEFAULT_MODE].focus_cycles);
 
         let theme = Theme::from_name(&config.settings.ui.theme);
         let notification_manager = NotificationManager::new(config.settings.notifications.enabled);
@@ -77,6 +79,10 @@ impl App {
 
     /// Snapshot of everything the renderer needs for the frame at `now`.
     pub fn view(&self, now: Instant) -> UiState<'_> {
+        let reward = self.timer.reward.as_ref();
+        let reward_anim_progress = reward.map_or(0.0, |r| r.animation_progress(now));
+        let reward_elapsed_ms = reward.map_or(0, |r| r.elapsed_ms(now));
+
         UiState {
             timer: &self.timer,
             theme: &self.theme,
@@ -87,6 +93,9 @@ impl App {
             modes: &self.modes,
             mode_index: self.mode_index,
             pending_mode: self.pending_mode,
+            reward,
+            reward_anim_progress,
+            reward_elapsed_ms,
             alarm_ringing: self.timer.alarm_ringing,
             alarm_flash: self.timer.alarm_ringing && self.alarm.flash_on(now),
             system_identity: &self.system_identity,
@@ -96,16 +105,17 @@ impl App {
     }
 
     /// Route a key action. Dialogs and separate pages are modal: while the
-    /// help screen, analytics page, or mode-switch confirmation is open, keys
-    /// only affect that view (so a stray key can never change the timer behind
-    /// something the user can't see). Quit and StopAlarm always work.
+    /// help screen, analytics page, mode-switch confirmation, or full-cycle
+    /// reward modal is open, keys only affect that view (so a stray key can
+    /// never change the timer behind something the user can't see). Quit and
+    /// StopAlarm always work.
     pub fn handle_action(&mut self, action: Action) {
         if action == Action::Quit {
             self.quit();
             return;
         }
 
-        // The stop-alarm key works from anywhere (even the help or analytics screen).
+        // The stop-alarm key works from anywhere (even the help, reward, or analytics screen).
         if action == Action::StopAlarm {
             self.stop_alarm();
             return;
@@ -117,18 +127,8 @@ impl App {
             return;
         }
 
-        // While the alarm rings only the stop key, display/page toggles and quit
-        // are active, so a stray key can't skip or restart the finished phase.
-        if self.timer.alarm_ringing {
-            match action {
-                Action::ToggleHelp => self.toggle_help(),
-                Action::ToggleAnalytics => self.toggle_analytics(),
-                Action::ToggleMinimal => self.toggle_minimal(),
-                _ => {}
-            }
-            return;
-        }
-
+        // Mode-switch confirmation modal takes priority and blocks unrelated keys
+        // so repeated presses cannot stack dialogs or bypass confirmation.
         if self.pending_mode.is_some() {
             match action {
                 Action::Confirm => self.confirm_mode_switch(),
@@ -153,6 +153,37 @@ impl App {
                     let max_scroll = self.timer.stats.recent_log.len().saturating_sub(1);
                     self.analytics_scroll = (self.analytics_scroll + 1).min(max_scroll);
                 }
+                _ => {}
+            }
+            return;
+        }
+
+        // While the full-cycle reward modal is visible, require explicit acknowledgment
+        // (`Enter` / `Space`) to transition into the final long break. Unrelated timer
+        // keys (`S`, `F`, `B`, `L`, `C`, `+`, `-`, `Esc`, `N`) are blocked so a stray
+        // press cannot accidentally dismiss the reward or alter the phase.
+        if self.timer.is_reward_pending() {
+            match action {
+                Action::Confirm | Action::TogglePause => self.acknowledge_reward(),
+                Action::Reset => self.reset(),
+                Action::SelectMode(index) => self.select_mode(index),
+                Action::CycleMode => self.cycle_mode(),
+                Action::ToggleHelp => self.toggle_help(),
+                Action::ToggleAnalytics => self.toggle_analytics(),
+                Action::ToggleMinimal => self.toggle_minimal(),
+                _ => {}
+            }
+            return;
+        }
+
+        // While the alarm rings on an intermediate phase or break, only the stop key,
+        // display/page toggles and quit are active, so a stray key can't skip or
+        // restart the finished phase.
+        if self.timer.alarm_ringing {
+            match action {
+                Action::ToggleHelp => self.toggle_help(),
+                Action::ToggleAnalytics => self.toggle_analytics(),
+                Action::ToggleMinimal => self.toggle_minimal(),
                 _ => {}
             }
             return;
@@ -193,12 +224,14 @@ impl App {
 
     pub fn reset(&mut self) {
         self.sync();
+        self.alarm.stop();
         self.timer.reset();
         self.update_status();
     }
 
     pub fn skip(&mut self) {
         let now = self.sync();
+        self.alarm.stop();
         let event = self.timer.skip();
         self.handle_phase_event(event, now);
         self.update_status();
@@ -206,12 +239,14 @@ impl App {
 
     pub fn select_phase(&mut self, phase: TimerPhase) {
         self.sync();
+        self.alarm.stop();
         self.timer.set_phase(phase);
         self.update_status();
     }
 
     pub fn toggle_break(&mut self) {
         self.sync();
+        self.alarm.stop();
         self.timer.toggle_break_phase();
         self.update_status();
     }
@@ -245,15 +280,33 @@ impl App {
         self.update_status();
     }
 
-    /// Stop the ringing alarm; the timer then moves on to the next phase
-    /// (paused, waiting for the user). Does nothing when no alarm is ringing.
+    /// Stop the ringing alarm. For intermediate focus phases and breaks, moves
+    /// on to the next phase (paused, waiting for the user). When a full-cycle
+    /// reward is pending, silences the chime while keeping the reward modal open.
     pub fn stop_alarm(&mut self) {
         if !self.timer.alarm_ringing {
             return;
         }
         let now = self.sync();
         self.alarm.stop();
-        if self.timer.dismiss_alarm().is_some() && self.timer.cycle_just_completed {
+        if self.timer.dismiss_alarm().is_some()
+            && self.timer.cycle_just_completed
+            && !self.timer.is_reward_pending()
+        {
+            self.celebration_until = Some(now + CELEBRATION_DURATION);
+        }
+        self.update_status();
+    }
+
+    /// Acknowledge/claim the full-cycle reward, silence any active alarm chime,
+    /// and transition into the mode's final long break (paused).
+    pub fn acknowledge_reward(&mut self) {
+        if !self.timer.is_reward_pending() {
+            return;
+        }
+        let now = self.sync();
+        self.alarm.stop();
+        if self.timer.acknowledge_reward().is_some() {
             self.celebration_until = Some(now + CELEBRATION_DURATION);
         }
         self.update_status();
@@ -303,6 +356,7 @@ impl App {
     }
 
     fn apply_mode(&mut self, index: usize) {
+        self.alarm.stop();
         self.mode_index = index;
         self.pending_mode = None;
         self.timer.set_mode(self.modes[index]);
@@ -325,6 +379,7 @@ impl App {
     }
 
     pub fn quit(&mut self) {
+        self.alarm.stop();
         self.running = false;
     }
 
@@ -339,6 +394,9 @@ impl App {
     fn start_alarm(&mut self, event: PhaseEvent, now: Instant) {
         self.notification_manager.send_phase_complete(event);
         self.pending_mode = None;
+        if event == PhaseEvent::CycleComplete {
+            self.show_analytics = false;
+        }
         self.alarm.start(now);
     }
 
@@ -358,28 +416,45 @@ impl App {
 mod tests {
     use super::*;
     use crate::config::settings::Settings;
+    use crate::timer::session::SessionStats;
 
     fn app() -> App {
         let mut settings = Settings::default();
         settings.notifications.enabled = false;
         settings.alarm.enabled = false;
         settings.integrations.hyprland_status_bar = false;
-        App::new(Config { settings }).expect("app")
+        let mut a = App::new(Config { settings }).expect("app");
+        // Ensure tests never touch disk stats
+        a.timer.stats = SessionStats::in_memory();
+        a
     }
 
     fn remaining_mins(app: &App) -> u64 {
         app.timer.current_timer.remaining.as_secs() / 60
     }
 
+    /// Complete the currently active phase in `app` via the clock.
+    fn finish_active_phase(app: &mut App, now: &mut Instant) {
+        app.timer.toggle_at(*now);
+        *now += app.timer.current_timer.remaining;
+        app.tick(*now);
+        assert!(app.timer.alarm_ringing);
+        if !app.timer.is_reward_pending() {
+            app.handle_action(Action::StopAlarm);
+        }
+    }
+
     #[test]
-    fn starts_in_classic_with_classic_durations() {
+    fn starts_in_classic_with_classic_durations_and_4_cycles() {
         let app = app();
         assert_eq!(app.mode_index, 0);
         assert_eq!(app.timer.mode.name, "Classic");
+        assert_eq!(app.timer.cycles_before_long_break, 4);
         assert_eq!(app.timer.category, FocusCategory::Coding);
         assert_eq!(remaining_mins(&app), 25);
         assert!(!app.timer.is_running());
         assert!(app.pending_mode.is_none());
+        assert!(!app.timer.is_reward_pending());
         assert!(!app.show_analytics);
         assert!(app.analytics_filter.is_none());
     }
@@ -455,12 +530,17 @@ mod tests {
         app.handle_action(Action::SelectMode(1));
         assert_eq!(app.mode_index, 1);
         assert_eq!(app.timer.mode.name, "Session");
+        assert_eq!(app.timer.cycles_before_long_break, 3);
         assert_eq!(remaining_mins(&app), 50);
         assert!(app.pending_mode.is_none());
 
         app.handle_action(Action::SelectMode(2));
+        assert_eq!(app.timer.mode.name, "Extended");
+        assert_eq!(app.timer.cycles_before_long_break, 2);
         assert_eq!(remaining_mins(&app), 75);
+
         app.handle_action(Action::SelectMode(0));
+        assert_eq!(app.timer.cycles_before_long_break, 4);
         assert_eq!(remaining_mins(&app), 25);
     }
 
@@ -496,6 +576,47 @@ mod tests {
         assert_eq!(app.mode_index, 0, "mode not changed before confirmation");
         assert_eq!(app.timer.mode.name, "Classic");
         assert!(app.timer.is_running(), "timer untouched while asking");
+    }
+
+    #[test]
+    fn switching_with_completed_cycles_requires_confirmation_and_preserves_stats() {
+        let mut app = app();
+        let mut now = Instant::now();
+        finish_active_phase(&mut app, &mut now); // Focus 1 of 4 completed
+        assert_eq!(app.timer.cycle_count, 1);
+        assert_eq!(app.timer.stats.sessions_completed, 1);
+        assert_eq!(app.timer.current_phase(), TimerPhase::ShortBreak);
+        assert!(!app.timer.is_running());
+
+        // Attempting to switch to Session mode while 1 of 4 cycles is completed requires confirmation
+        app.handle_action(Action::SelectMode(1));
+        assert_eq!(app.pending_mode, Some(1));
+        assert_eq!(app.mode_index, 0);
+
+        // Repeated mode keys while modal is open cannot bypass or replace the pending confirmation
+        app.handle_action(Action::SelectMode(2));
+        app.handle_action(Action::CycleMode);
+        assert_eq!(app.pending_mode, Some(1));
+
+        // Esc cancels and preserves cycle_count == 1, ShortBreak, and category
+        app.handle_action(Action::Escape);
+        assert!(app.pending_mode.is_none());
+        assert_eq!(app.mode_index, 0);
+        assert_eq!(app.timer.cycle_count, 1);
+        assert_eq!(app.timer.current_phase(), TimerPhase::ShortBreak);
+
+        // Confirming switches to Session mode once, resets cycle_count to 0, and preserves recorded stats
+        app.handle_action(Action::SelectMode(1));
+        app.handle_action(Action::Confirm);
+        assert!(app.pending_mode.is_none());
+        assert_eq!(app.mode_index, 1);
+        assert_eq!(app.timer.mode.name, "Session");
+        assert_eq!(app.timer.cycles_before_long_break, 3);
+        assert_eq!(app.timer.cycle_count, 0);
+        assert_eq!(app.timer.current_phase(), TimerPhase::Focus);
+        assert_eq!(remaining_mins(&app), 50);
+        assert_eq!(app.timer.stats.sessions_completed, 1);
+        assert_eq!(app.timer.stats.today_focus_time, Duration::from_secs(25 * 60));
     }
 
     #[test]
@@ -570,6 +691,52 @@ mod tests {
         assert!(!app.show_help);
         assert!(!app.show_analytics);
         assert!(!app.minimal_mode);
+    }
+
+    #[test]
+    fn full_cycle_reward_modal_blocks_unrelated_keys_and_starts_long_break_on_confirm() {
+        let mut app = app();
+        app.handle_action(Action::SelectMode(2)); // Extended mode (2 focus cycles)
+        let mut now = Instant::now();
+
+        // Cycle 1: Focus 1 (75m) -> Short Break 1 (15m)
+        finish_active_phase(&mut app, &mut now);
+        assert!(!app.timer.is_reward_pending());
+        finish_active_phase(&mut app, &mut now);
+
+        // Cycle 2: Focus 2 (75m) -> unlocks Full-Cycle Reward
+        finish_active_phase(&mut app, &mut now);
+        assert!(app.timer.is_reward_pending());
+        assert_eq!(app.timer.stats.sessions_completed, 2);
+
+        // Unrelated timer keys do not dismiss the reward or alter the phase
+        for a in [
+            Action::Skip,
+            Action::SelectPhase(TimerPhase::ShortBreak),
+            Action::ToggleBreak,
+            Action::CycleCategory,
+            Action::AddTime,
+            Action::SubtractTime,
+            Action::Cancel,
+            Action::Escape,
+        ] {
+            app.handle_action(a);
+        }
+        assert!(app.timer.is_reward_pending(), "reward must still be visible");
+        assert!(app.running, "Escape on reward modal must not quit the app");
+
+        // Pressing StopAlarm ('A') silences the alarm chime while keeping the reward modal open
+        app.handle_action(Action::StopAlarm);
+        assert!(!app.timer.alarm_ringing);
+        assert!(app.timer.is_reward_pending());
+
+        // Pressing Enter (Confirm) claims the reward and starts the 45-minute final Long Break
+        app.handle_action(Action::Confirm);
+        assert!(!app.timer.is_reward_pending());
+        assert_eq!(app.timer.current_phase(), TimerPhase::LongBreak);
+        assert_eq!(remaining_mins(&app), 45);
+        assert!(!app.timer.is_running());
+        assert_eq!(app.timer.stats.sessions_completed, 2, "stats not duplicated");
     }
 
     #[test]
