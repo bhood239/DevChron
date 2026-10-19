@@ -10,16 +10,16 @@
 
 DevChron tracks your work across three first-class focus categories—**Coding** (`#FF9E64` warm orange), **Learning** (`#2AC3DE` bright cyan), and **Reading** (`#BB9AF7` violet)—and three structured Pomodoro modes (**Classic**, **Session**, and **Extended**). Switching categories with `C` (or `Shift+Tab`) immediately updates the Braille ring gradient, 5×5 block digits, header chip, and live category telemetry in the top-right corner.
 
-| Coding (`Classic · 25/5/15`) | Learning (`Session · 50/10/30`) | Reading (`Extended · 75/15/45`) |
-|---|---|---|
+| Coding (`Classic · 25/5/15`)                                   | Learning (`Session · 50/10/30`)                                    | Reading (`Extended · 75/15/45`)                                   |
+| -------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | ![Coding Focus in Classic Mode](assets/timer-focus-coding.png) | ![Learning Focus in Session Mode](assets/timer-focus-learning.png) | ![Reading Focus in Extended Mode](assets/timer-focus-reading.png) |
 
 ### 2. Short Breaks & Final Long Breaks
 
 You can let phases progress naturally through your active mode's schedule or jump directly between **Focus** (`F`), **Short break** (`B`), and **Long break** (`L`) at any time. Each break phase renders with its own dedicated TokyoNight gradient so you can tell at a glance from across the room whether you are in a focus block, a short breather, or a final long recovery break.
 
-| Short Break (`B`) | Final Long Break (`L`) |
-|---|---|
+| Short Break (`B`)                                 | Final Long Break (`L`)                                |
+| ------------------------------------------------- | ----------------------------------------------------- |
 | ![Short Break View](assets/timer-short-break.png) | ![Final Long Break View](assets/timer-long-break.png) |
 
 ### 3. Animated Full-Cycle Reward Modal
@@ -72,21 +72,21 @@ When any focus or break phase reaches `00:00`, DevChron holds at `00:00`, flashe
 
 ![Alarm Ringing at 00:00](assets/timer-alarm.png)
 
- Need zero chrome while working, or a quick reminder of keybindings? Toggle **Minimal Mode** with `M` or open the **Keyboard Shortcuts** screen with `H` / `?`:
+Need zero chrome while working, or a quick reminder of keybindings? Toggle **Minimal Mode** with `M` or open the **Keyboard Shortcuts** screen with `H` / `?`:
 
-| Minimal Mode (`M`) | Keyboard Shortcuts (`H` / `?`) |
-|---|---|
+| Minimal Mode (`M`)                       | Keyboard Shortcuts (`H` / `?`)                            |
+| ---------------------------------------- | --------------------------------------------------------- |
 | ![Minimal Mode](assets/minimal-mode.png) | ![Keyboard Shortcuts Help Screen](assets/help-screen.png) |
 
 ## Focus Modes & Authoritative Cycle Schedules
 
 All modes are defined in a single authoritative table (`MODES` in `src/timer/mode.rs`). Each mode specifies its focus duration, short-break duration, final long-break duration, and required number of completed focus cycles:
 
-| Key | Mode | Focus Cycles | Focus Duration | Short Breaks | Final Long Break | Total Focus Time |
-|---|---|---|---|---|---|---|
-| `1` | **Classic** (default) | **4 cycles** | 25 min | 5 min (×3) | 15 min | **100 min** (1h 40m) |
-| `2` | **Session** | **3 cycles** | 50 min | 10 min (×2) | 30 min | **150 min** (2h 30m) |
-| `3` | **Extended** | **2 cycles** | 75 min | 15 min (×1) | 45 min | **150 min** (2h 30m) |
+| Key | Mode                  | Focus Cycles | Focus Duration | Short Breaks | Final Long Break | Total Focus Time     |
+| --- | --------------------- | ------------ | -------------- | ------------ | ---------------- | -------------------- |
+| `1` | **Classic** (default) | **4 cycles** | 25 min         | 5 min (×3)   | 15 min           | **100 min** (1h 40m) |
+| `2` | **Session**           | **3 cycles** | 50 min         | 10 min (×2)  | 30 min           | **150 min** (2h 30m) |
+| `3` | **Extended**          | **2 cycles** | 75 min         | 15 min (×1)  | 45 min           | **150 min** (2h 30m) |
 
 ### Exact Phase Sequences
 
@@ -107,28 +107,65 @@ All modes are defined in a single authoritative table (`MODES` in `src/timer/mod
 
 DevChron uses foreground colors exclusively (no opaque background fills) so terminal transparency and Hyprland blur work out of the box. Every color in `src/ui/theme.rs` has a dedicated semantic role:
 
-| Semantic Role | Description | Hex |
-|---|---|---|
-| **Coding** (`Focus` default) | Warm orange primary accent & gradient start | `#FF9E64` |
-| **Coding Gradient End** | Warm amber-gold ring & digit gradient end | `#FFC777` |
-| **Learning** (`Short break`) | Bright cyan accent & gradient start | `#2AC3DE` |
-| **Learning Gradient End** | Mint-aqua ring & digit gradient end | `#73DACA` |
-| **Reading** (`Long break`) | Vivid violet accent & gradient start | `#BB9AF7` |
-| **Reading Gradient End** | Deep lavender ring & digit gradient end | `#9D7CD8` |
-| **All-Category Yearly Grid** | Contribution-green heatmap ramp (`All` view) | `#39D353` |
-| **Today Marker** | Solar yellow cell highlight (independent of filter) | `#F0D75E` |
-| **Gold / Streaks / Records** | Trophy gold for streaks, peaks, and callouts | `#E0AF68` |
-| **Emerald / Completion** | Soft green for completed sessions and live badge | `#9ECE6A` |
-| **Sky / Information** | TokyoNight blue for Session mode & averages | `#7AA2F7` |
-| **Section Headings** | Ice blue for section headers and Analytics link | `#7DCFFF` |
-| **Reset / Alarm / Warning** | Signal rose-pink for `00:00` alarm & resets | `#F7768E` |
-| **Primary Text** | Cool lavender-white body & value typography | `#C0CAF5` |
-| **Muted Labels / Paused** | Slate-blue for secondary labels & paused state | `#565F89` |
-| **Frames & Dividers** | Deep navy-slate for single rounded outer frame | `#292E42` |
+| Semantic Role                | Description                                         | Hex       |
+| ---------------------------- | --------------------------------------------------- | --------- |
+| **Coding** (`Focus` default) | Warm orange primary accent & gradient start         | `#FF9E64` |
+| **Coding Gradient End**      | Warm amber-gold ring & digit gradient end           | `#FFC777` |
+| **Learning** (`Short break`) | Bright cyan accent & gradient start                 | `#2AC3DE` |
+| **Learning Gradient End**    | Mint-aqua ring & digit gradient end                 | `#73DACA` |
+| **Reading** (`Long break`)   | Vivid violet accent & gradient start                | `#BB9AF7` |
+| **Reading Gradient End**     | Deep lavender ring & digit gradient end             | `#9D7CD8` |
+| **All-Category Yearly Grid** | Contribution-green heatmap ramp (`All` view)        | `#39D353` |
+| **Today Marker**             | Solar yellow cell highlight (independent of filter) | `#F0D75E` |
+| **Gold / Streaks / Records** | Trophy gold for streaks, peaks, and callouts        | `#E0AF68` |
+| **Emerald / Completion**     | Soft green for completed sessions and live badge    | `#9ECE6A` |
+| **Sky / Information**        | TokyoNight blue for Session mode & averages         | `#7AA2F7` |
+| **Section Headings**         | Ice blue for section headers and Analytics link     | `#7DCFFF` |
+| **Reset / Alarm / Warning**  | Signal rose-pink for `00:00` alarm & resets         | `#F7768E` |
+| **Primary Text**             | Cool lavender-white body & value typography         | `#C0CAF5` |
+| **Muted Labels / Paused**    | Slate-blue for secondary labels & paused state      | `#565F89` |
+| **Frames & Dividers**        | Deep navy-slate for single rounded outer frame      | `#292E42` |
 
 ## Installation
 
-Clone the repository directly from [https://github.com/Atharvapawar007/DevChron](https://github.com/Atharvapawar007/DevChron) and install with the bundled user-local installer script (or Cargo):
+Choose the installation method that best fits your system.
+
+### 1. Arch Linux (Pre-built Package)
+
+You can install the pre-compiled package directly from the [GitHub Releases](https://github.com/Atharvapawar007/DevChron/releases) without compiling from source:
+
+```bash
+# Install directly via pacman
+sudo pacman -U https://github.com/Atharvapawar007/DevChron/releases/download/v0.1.1/devchron-plus-0.1.1-1-x86_64.pkg.tar.zst
+```
+
+Or, if you downloaded the package file locally:
+
+```bash
+sudo pacman -U devchron-plus-0.1.1-1-x86_64.pkg.tar.zst
+```
+
+### 2. Arch Linux (AUR)
+
+If you use an AUR helper like `yay` or `paru`:
+
+```bash
+yay -S devchron-plus
+# or
+paru -S devchron-plus
+```
+
+To build and install manually with `makepkg`:
+
+```bash
+git clone https://github.com/Atharvapawar007/DevChron.git
+cd DevChron
+makepkg -si
+```
+
+### 3. Build from Source (Any Linux / macOS)
+
+Clone the repository and run the bundled installer script:
 
 ```bash
 git clone https://github.com/Atharvapawar007/DevChron.git
@@ -136,25 +173,43 @@ cd DevChron
 ./scripts/install.sh
 ```
 
-`./scripts/install.sh` builds the optimized release binary (`cargo build --release --locked`) and installs:
-- `~/.local/bin/devchron` — executable binary (ensure `~/.local/bin` is on your `PATH`)
-- `~/.local/share/applications/devchron.desktop` — desktop launcher entry
-- `~/.local/share/icons/hicolor/scalable/apps/devchron.svg` — scalable app icon
+`./scripts/install.sh` builds the release binary (`cargo build --release --locked`) and sets up:
 
-To uninstall the binary, desktop entry, and icon while leaving your `~/.config/devchron` settings and `~/.local/share/devchron/stats.json` history untouched:
+- `~/.local/bin/devchron`: executable binary (make sure `~/.local/bin` is on your `$PATH`)
+- `~/.local/share/applications/devchron.desktop`: desktop launcher entry
+- `~/.local/share/icons/hicolor/scalable/apps/devchron.svg`: scalable vector icon
+
+Alternatively, you can install directly with Cargo:
+
+```bash
+cargo install --path . --locked
+```
+
+## Uninstallation
+
+**Arch Linux package (pacman / AUR):**
+
+```bash
+sudo pacman -Rns devchron-plus
+```
+
+**Script installer:**
 
 ```bash
 ./scripts/install.sh --uninstall
 ```
 
-### Requirements
+> **Note:** Uninstalling removes the binaries and desktop shortcuts while preserving your user settings (`~/.config/devchron`) and focus history (`~/.local/share/devchron/stats.json`).
 
-| Component | Requirement |
-|---|---|
-| **Compiler** | Rust & Cargo (`1.78+` required by lockfile, `1.85+` recommended) |
-| **Terminal** | Any truecolor terminal with Braille glyph support (`kitty`, `foot`, `wezterm`, `alacritty`, `ghostty`, `iTerm2`) |
-| **Alarm Audio** | Any one of `pw-play` (PipeWire), `paplay` (PulseAudio), `aplay` (ALSA) on Linux, or `afplay` on macOS (falls back to terminal bell if none are installed) |
-| **Notifications** | Desktop notification daemon (`swaync`, `mako`, `dunst` on Linux; native Notification Center on macOS) |
+## Requirements
+
+| Component                | Requirement                                                                                                                                               |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Operating System         | Linux (native Hyprland/Wayland/X11 support) or macOS                                                                                                      |
+| Compiler (source builds) | Rust & Cargo (1.78+ required, 1.85+ recommended)                                                                                                          |
+| Terminal                 | Any truecolor terminal with Braille glyph support (kitty, foot, wezterm, alacritty, ghostty, iTerm2)                                                      |
+| Alarm Audio              | Any one of `pw-play` (PipeWire), `paplay` (PulseAudio), `aplay` (ALSA) on Linux, or `afplay` on macOS (falls back to terminal bell if none are installed) |
+| Notifications            | Desktop notification daemon (swaync, mako, dunst on Linux; native Notification Center on macOS)                                                           |
 
 ## Keyboard Shortcuts
 
@@ -162,25 +217,25 @@ To uninstall the binary, desktop entry, and icon while leaving your `~/.config/d
 devchron
 ```
 
-| Key | Context | Action |
-|---|---|---|
-| `Space` / `P` | Timer | Start or pause the current timer phase |
-| `Enter` / `Space` / `Y` | Reward Modal | Claim the Full-Cycle Reward and transition to the Final Long Break |
-| `F` / `B` / `L` | Timer | Switch directly to **Focus**, **Short break**, or **Long break** |
-| `C` / `Shift+Tab` | Timer | Cycle active Focus category (`Coding` → `Learning` → `Reading`) |
-| `1` / `2` / `3` | Timer | Select **Classic** (`25/5/15`), **Session** (`50/10/30`), or **Extended** (`75/15/45`) mode |
-| `Tab` | Timer | Cycle to the next Pomodoro mode (`Classic` → `Session` → `Extended`) |
-| `Y` / `Enter`, `N` / `Esc` | Confirm Modal | Confirm or cancel a mode/phase switch when progress exists |
-| `+` / `-` | Timer | Add or subtract 5 minutes from the current phase |
-| `S` | Timer | Skip to the next phase (does not count as a completed focus cycle) |
-| `R` | Timer / Reward | Reset the current phase (or dismiss reward and reset to Focus 1) |
-| `A` | Any View | Stop the ringing `00:00` alarm and advance (or unlock the Full-Cycle Reward) |
-| `G` / `D` | Any View | Open or close the offline **Analytics** dashboard |
-| `C` / `Tab` | Analytics | Cycle category filter (`All` → `Coding` → `Learning` → `Reading`) |
-| `J` / `K` / `↑` / `↓` | Analytics | Scroll the **Recent sessions** flight log |
-| `M` | Timer | Toggle distraction-free **Minimal Mode** |
-| `H` / `?` | Any View | Open the **Keyboard Shortcuts** help screen (any key closes it) |
-| `Q` / `Esc` | Any View | Quit DevChron (`Esc` closes Analytics, Help, or modal dialogs first) |
+| Key                        | Context        | Action                                                                                      |
+| -------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `Space` / `P`              | Timer          | Start or pause the current timer phase                                                      |
+| `Enter` / `Space` / `Y`    | Reward Modal   | Claim the Full-Cycle Reward and transition to the Final Long Break                          |
+| `F` / `B` / `L`            | Timer          | Switch directly to **Focus**, **Short break**, or **Long break**                            |
+| `C` / `Shift+Tab`          | Timer          | Cycle active Focus category (`Coding` → `Learning` → `Reading`)                             |
+| `1` / `2` / `3`            | Timer          | Select **Classic** (`25/5/15`), **Session** (`50/10/30`), or **Extended** (`75/15/45`) mode |
+| `Tab`                      | Timer          | Cycle to the next Pomodoro mode (`Classic` → `Session` → `Extended`)                        |
+| `Y` / `Enter`, `N` / `Esc` | Confirm Modal  | Confirm or cancel a mode/phase switch when progress exists                                  |
+| `+` / `-`                  | Timer          | Add or subtract 5 minutes from the current phase                                            |
+| `S`                        | Timer          | Skip to the next phase (does not count as a completed focus cycle)                          |
+| `R`                        | Timer / Reward | Reset the current phase (or dismiss reward and reset to Focus 1)                            |
+| `A`                        | Any View       | Stop the ringing `00:00` alarm and advance (or unlock the Full-Cycle Reward)                |
+| `G` / `D`                  | Any View       | Open or close the offline **Analytics** dashboard                                           |
+| `C` / `Tab`                | Analytics      | Cycle category filter (`All` → `Coding` → `Learning` → `Reading`)                           |
+| `J` / `K` / `↑` / `↓`      | Analytics      | Scroll the **Recent sessions** flight log                                                   |
+| `M`                        | Timer          | Toggle distraction-free **Minimal Mode**                                                    |
+| `H` / `?`                  | Any View       | Open the **Keyboard Shortcuts** help screen (any key closes it)                             |
+| `Q` / `Esc`                | Any View       | Quit DevChron (`Esc` closes Analytics, Help, or modal dialogs first)                        |
 
 ## Configuration
 
@@ -244,12 +299,12 @@ Add the module to your `~/.config/waybar/config`:
 
 ## Files & Data Paths
 
-| Path | Purpose |
-|---|---|
-| `~/.config/devchron/config.toml` | User configuration file (created automatically on first run) |
+| Path                                 | Purpose                                                                 |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `~/.config/devchron/config.toml`     | User configuration file (created automatically on first run)            |
 | `~/.local/share/devchron/stats.json` | Offline daily, hourly, per-category, and per-mode historical statistics |
-| `~/.cache/devchron/status.json` | Live JSON status output for Waybar and status bars |
-| `~/.cache/devchron/alarm-chime.wav` | Cached copy of the embedded four-note alarm chime |
+| `~/.cache/devchron/status.json`      | Live JSON status output for Waybar and status bars                      |
+| `~/.cache/devchron/alarm-chime.wav`  | Cached copy of the embedded four-note alarm chime                       |
 
 ## Project Architecture
 
