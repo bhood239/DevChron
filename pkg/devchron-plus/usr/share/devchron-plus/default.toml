@@ -1,0 +1,20 @@
+# DevChron Configuration
+
+[timer]
+focus_duration = 25        # minutes
+short_break_duration = 5   # minutes
+long_break_duration = 15   # minutes
+cycles_before_long_break = 4
+
+[notifications]
+enabled = true
+sound_enabled = false
+
+[alarm]
+enabled = true             # bell chime at 00:00, repeating until stopped with A
+
+[ui]
+theme = "reef"  # reef, daybreak, meadow, tropic, harbor, sorbet
+
+[integrations]
+hyprland_status_bar = true

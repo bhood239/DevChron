@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=DevChron
+GenericName=Pomodoro Timer
+Comment=Terminal Pomodoro timer with Classic, Session and Extended modes
+# install.sh replaces /usr/bin/devchron with the absolute path of the installed binary so the
+# launcher works even when ~/.local/bin is not on the desktop session's PATH.
+Exec=kitty --class devchron --title DevChron -e /usr/bin/devchron
+Icon=devchron
+Terminal=false
+Categories=Utility;Clock;
+Keywords=pomodoro;timer;focus;productivity;
+StartupWMClass=devchron
